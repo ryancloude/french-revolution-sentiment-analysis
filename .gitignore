@@ -43,6 +43,10 @@ _delta_log/
 data/*
 !data/lookup/
 !data/lookup/**
+# Track reproducible sample definitions, but not downloaded files
+!data/sample/
+data/sample/*
+!data/sample/document_ids.txt
 
 # Notebook checkpoints
 .ipynb_checkpoints/
