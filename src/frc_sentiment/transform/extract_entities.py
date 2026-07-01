@@ -110,7 +110,11 @@ def extract_mentions_from_text(
     return mentions
 
 
-def get_figure_variants(spark: SparkSession, catalog: str, schema: str) -> list[dict[str, str | None]]:
+def get_figure_variants(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> list[dict[str, str | None]]:
     """Collect the figure lookup table to the driver."""
     figures_table = table_name(catalog, schema, "silver_figures")
 
