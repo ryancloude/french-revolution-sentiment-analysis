@@ -1,0 +1,50 @@
+figure_id,canonical_name,variant,variant_normalized,variant_type,match_confidence,notes
+louis_xvi,Louis XVI,Louis XVI,louis xvi,proper_name,high,
+louis_xvi,Louis XVI,Louis Seize,louis seize,proper_name,high,French written form of Louis XVI
+louis_xvi,Louis XVI,Louis Capet,louis capet,proper_name,high,Revolutionary-era name after monarchy was abolished
+louis_xvi,Louis XVI,le roi,le roi,title,low,Ambiguous title; likely Louis XVI in many contexts but not always
+louis_xvi,Louis XVI,roi de France,roi de france,title,medium,
+marie_antoinette,Marie Antoinette,Marie Antoinette,marie antoinette,proper_name,high,
+marie_antoinette,Marie Antoinette,Antoinette,antoinette,proper_name,medium,
+marie_antoinette,Marie Antoinette,la reine,la reine,title,low,Ambiguous title
+marie_antoinette,Marie Antoinette,l'Autrichienne,l'autrichienne,title,medium,Common hostile label for Marie Antoinette but still rhetorical/ambiguous
+marie_antoinette,Marie Antoinette,Autrichienne,autrichienne,title,low,Can refer to Austrian identity generally
+necker,Jacques Necker,Necker,necker,proper_name,high,
+necker,Jacques Necker,Jacques Necker,jacques necker,proper_name,high,
+necker,Jacques Necker,M. Necker,m. necker,title_name,high,
+mirabeau,Mirabeau,Mirabeau,mirabeau,proper_name,high,
+mirabeau,Mirabeau,comte de Mirabeau,comte de mirabeau,title_name,high,
+mirabeau,Mirabeau,M. de Mirabeau,m. de mirabeau,title_name,high,
+lafayette,Lafayette,Lafayette,lafayette,proper_name,high,
+lafayette,Lafayette,La Fayette,la fayette,proper_name,high,
+lafayette,Lafayette,M. de Lafayette,m. de lafayette,title_name,high,
+lafayette,Lafayette,marquis de Lafayette,marquis de lafayette,title_name,high,
+sieyes,Emmanuel-Joseph Sieyès,Sieyès,sieyès,proper_name,high,
+sieyes,Emmanuel-Joseph Sieyès,Sieyes,sieyes,proper_name,high,Unaccented spelling
+sieyes,Emmanuel-Joseph Sieyès,abbé Sieyès,abbé sieyès,title_name,high,
+sieyes,Emmanuel-Joseph Sieyès,abbe Sieyes,abbe sieyes,title_name,high,Unaccented spelling
+robespierre,Maximilien Robespierre,Robespierre,robespierre,proper_name,high,
+robespierre,Maximilien Robespierre,Maximilien Robespierre,maximilien robespierre,proper_name,high,
+danton,Georges Danton,Danton,danton,proper_name,high,
+danton,Georges Danton,Georges Danton,georges danton,proper_name,high,
+marat,Jean-Paul Marat,Marat,marat,proper_name,high,
+marat,Jean-Paul Marat,Jean-Paul Marat,jean-paul marat,proper_name,high,
+marat,Jean-Paul Marat,Ami du peuple,ami du peuple,title_name,medium,May refer to Marat or to his newspaper
+marat,Jean-Paul Marat,l'Ami du peuple,l'ami du peuple,title_name,medium,May refer to Marat or to his newspaper
+brissot,Jacques Pierre Brissot,Brissot,brissot,proper_name,high,
+brissot,Jacques Pierre Brissot,Jacques Brissot,jacques brissot,proper_name,high,
+brissot,Jacques Pierre Brissot,Brissot de Warville,brissot de warville,proper_name,high,
+saint_just,Louis Antoine de Saint-Just,Saint-Just,saint-just,proper_name,high,
+saint_just,Louis Antoine de Saint-Just,Saint Just,saint just,proper_name,high,
+saint_just,Louis Antoine de Saint-Just,St-Just,st-just,proper_name,high,
+saint_just,Louis Antoine de Saint-Just,Louis Antoine de Saint-Just,louis antoine de saint-just,proper_name,high,
+barras,Paul Barras,Barras,barras,proper_name,high,
+barras,Paul Barras,Paul Barras,paul barras,proper_name,high,
+philippe_egalite,Philippe Égalité,Philippe Égalité,philippe égalité,proper_name,high,
+philippe_egalite,Philippe Égalité,Philippe Egalité,philippe egalité,proper_name,high,Unaccented spelling
+philippe_egalite,Philippe Égalité,duc d'Orléans,duc d'orléans,title_name,high,
+philippe_egalite,Philippe Égalité,duc d Orleans,duc d orleans,title_name,high,Unaccented/apostrophe-free spelling
+philippe_egalite,Philippe Égalité,Louis Philippe Joseph,louis philippe joseph,proper_name,high,
+philippe_egalite,Philippe Égalité,Louis-Philippe-Joseph,louis-philippe-joseph,proper_name,high,
+philippe_egalite,Philippe Égalité,Égalité,égalité,title_name,low,Ambiguous; can refer to equality as a political concept
+philippe_egalite,Philippe Égalité,Egalité,egalité,title_name,low,Ambiguous; can refer to equality as a political concept

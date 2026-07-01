@@ -1,0 +1,22 @@
+resources:
+  jobs:
+    silver_figures:
+      name: ${bundle.target}-frc-silver-figures
+
+      tasks:
+        - task_key: load_figure_lookup
+          spark_python_task:
+            python_file: ../src/frc_sentiment/transform/load_figures.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+              - --figures-path
+              - data/lookup/figures.csv
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
