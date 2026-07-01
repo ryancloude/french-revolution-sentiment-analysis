@@ -1,0 +1,20 @@
+resources:
+  jobs:
+    silver_entity_mentions:
+      name: ${bundle.target}-frc-silver-entity-mentions
+
+      tasks:
+        - task_key: extract_entity_mentions
+          spark_python_task:
+            python_file: ../src/frc_sentiment/transform/extract_entities.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
