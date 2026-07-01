@@ -1,0 +1,24 @@
+resources:
+  jobs:
+    silver_context_windows:
+      name: ${bundle.target}-frc-silver-context-windows
+
+      tasks:
+        - task_key: build_context_windows
+          spark_python_task:
+            python_file: ../src/frc_sentiment/transform/build_context_windows.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+              - --words-before
+              - "75"
+              - --words-after
+              - "75"
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
