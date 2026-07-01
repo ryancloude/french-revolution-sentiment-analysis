@@ -1,0 +1,20 @@
+resources:
+  jobs:
+    silver_quality_summary:
+      name: ${bundle.target}-frc-silver-quality-summary
+
+      tasks:
+        - task_key: build_quality_summary
+          spark_python_task:
+            python_file: ../src/frc_sentiment/transform/build_quality_summary.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
