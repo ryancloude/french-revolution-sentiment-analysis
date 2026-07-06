@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import unicodedata
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -22,6 +23,20 @@ PARSED_METADATA_SCHEMA = T.StructType(
         T.StructField("source_url", T.StringType(), True),
         T.StructField("metadata_parse_status", T.StringType(), False),
         T.StructField("metadata_parse_error", T.StringType(), True),
+    ]
+)
+
+DATE_PARSE_SCHEMA = T.StructType(
+    [
+        T.StructField("publication_year", T.IntegerType(), True),
+        T.StructField("publication_month", T.IntegerType(), True),
+        T.StructField("publication_day", T.IntegerType(), True),
+        T.StructField("publication_date", T.StringType(), True),
+        T.StructField("date_precision", T.StringType(), False),
+        T.StructField("date_source", T.StringType(), False),
+        T.StructField("date_calendar", T.StringType(), False),
+        T.StructField("date_parse_confidence", T.StringType(), False),
+        T.StructField("date_parse_notes", T.StringType(), True),
     ]
 )
 
@@ -44,6 +59,289 @@ def table_name(catalog: str, schema: str, table: str) -> str:
         ]
     )
 
+FRENCH_MONTHS = {
+    "janvier": 1,
+    "fevrier": 2,
+    "mars": 3,
+    "avril": 4,
+    "mai": 5,
+    "juin": 6,
+    "juillet": 7,
+    "aout": 8,
+    "septembre": 9,
+    "octobre": 10,
+    "novembre": 11,
+    "decembre": 12,
+}
+
+REVOLUTIONARY_MONTHS = {
+    "vendemiaire": 1,
+    "brumaire": 2,
+    "frimaire": 3,
+    "nivose": 4,
+    "pluviose": 5,
+    "ventose": 6,
+    "germinal": 7,
+    "floreal": 8,
+    "prairial": 9,
+    "messidor": 10,
+    "thermidor": 11,
+    "fructidor": 12,
+}
+
+
+def strip_accents(value: str) -> str:
+    """Remove accents for simpler French date matching."""
+    normalized = unicodedata.normalize("NFKD", value)
+    return "".join(character for character in normalized if not unicodedata.combining(character))
+
+
+def normalize_date_text(value: str | None) -> str:
+    """Normalize date text for regex-based date parsing."""
+    if not value:
+        return ""
+
+    no_accents = strip_accents(value.lower())
+    normalized = no_accents.replace(",", " ").replace(".", " ").replace("'", " ")
+    return " ".join(normalized.split())
+
+
+def roman_to_int(value: str) -> int | None:
+    """Convert a Roman numeral to an integer."""
+    roman_values = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+    total = 0
+    previous = 0
+
+    for character in reversed(value.lower()):
+        current = roman_values.get(character)
+        if current is None:
+            return None
+
+        if current < previous:
+            total -= current
+        else:
+            total += current
+            previous = current
+
+    return total or None
+
+
+def parse_revolutionary_year(value: str) -> int | None:
+    """Parse a French Republican calendar year written as a number or Roman numeral."""
+    if value.isdigit():
+        return int(value)
+
+    return roman_to_int(value)
+
+
+def date_result(
+    publication_year: int | None,
+    publication_month: int | None,
+    publication_day: int | None,
+    publication_date: str | None,
+    date_precision: str,
+    date_source: str,
+    date_calendar: str,
+    date_parse_confidence: str,
+    date_parse_notes: str | None = None,
+) -> dict[str, str | int | None]:
+    """Build a consistent date parse result."""
+    return {
+        "publication_year": publication_year,
+        "publication_month": publication_month,
+        "publication_day": publication_day,
+        "publication_date": publication_date,
+        "date_precision": date_precision,
+        "date_source": date_source,
+        "date_calendar": date_calendar,
+        "date_parse_confidence": date_parse_confidence,
+        "date_parse_notes": date_parse_notes,
+    }
+
+
+def convert_revolutionary_date(
+    republican_year: int,
+    republican_month: int,
+    republican_day: int,
+) -> tuple[int, int, int]:
+    """Convert a French Republican date to Gregorian year, month, day."""
+    from convertdate import french_republican
+
+    return french_republican.to_gregorian(
+        republican_year,
+        republican_month,
+        republican_day,
+    )
+
+
+def parse_date_from_text(
+    value: str | None,
+    source: str,
+    confidence: str,
+) -> dict[str, str | int | None]:
+    """Parse Gregorian or French Republican date information from one text field."""
+    normalized = normalize_date_text(value)
+
+    if not normalized:
+        return date_result(None, None, None, None, "unknown", "none", "unknown", "low")
+
+    iso_match = re.search(r"\b(1[5-9]\d{2}|20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", normalized)
+    if iso_match:
+        year = int(iso_match.group(1))
+        month = int(iso_match.group(2))
+        day = int(iso_match.group(3))
+
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return date_result(
+                year,
+                month,
+                day,
+                f"{year:04d}-{month:02d}-{day:02d}",
+                "day",
+                source,
+                "gregorian",
+                confidence,
+            )
+
+    revolutionary_day_match = re.search(
+        r"\b(\d{1,2})(?:er)?\s+("
+        + "|".join(REVOLUTIONARY_MONTHS)
+        + r")\s+an\s+([ivxlcdm]+|\d+)\b",
+        normalized,
+    )
+    if revolutionary_day_match:
+        republican_day = int(revolutionary_day_match.group(1))
+        republican_month = REVOLUTIONARY_MONTHS[revolutionary_day_match.group(2)]
+        republican_year = parse_revolutionary_year(revolutionary_day_match.group(3))
+
+        if republican_year is not None and 1 <= republican_day <= 30:
+            year, month, day = convert_revolutionary_date(
+                republican_year,
+                republican_month,
+                republican_day,
+            )
+            return date_result(
+                year,
+                month,
+                day,
+                f"{year:04d}-{month:02d}-{day:02d}",
+                "day",
+                source,
+                "french_republican",
+                confidence,
+                "Converted from French Republican calendar using convertdate.",
+            )
+
+    french_date_match = re.search(
+        r"\b(\d{1,2})(?:er)?\s+("
+        + "|".join(FRENCH_MONTHS)
+        + r")\s+(1[5-9]\d{2}|20\d{2})\b",
+        normalized,
+    )
+    if french_date_match:
+        day = int(french_date_match.group(1))
+        month = FRENCH_MONTHS[french_date_match.group(2)]
+        year = int(french_date_match.group(3))
+
+        if 1 <= day <= 31:
+            return date_result(
+                year,
+                month,
+                day,
+                f"{year:04d}-{month:02d}-{day:02d}",
+                "day",
+                source,
+                "gregorian",
+                confidence,
+            )
+
+    french_month_year_match = re.search(
+        r"\b("
+        + "|".join(FRENCH_MONTHS)
+        + r")\s+(1[5-9]\d{2}|20\d{2})\b",
+        normalized,
+    )
+    if french_month_year_match:
+        month = FRENCH_MONTHS[french_month_year_match.group(1)]
+        year = int(french_month_year_match.group(2))
+        return date_result(
+            year,
+            month,
+            None,
+            None,
+            "month",
+            source,
+            "gregorian",
+            confidence,
+        )
+
+    revolutionary_month_match = re.search(
+        r"\b("
+        + "|".join(REVOLUTIONARY_MONTHS)
+        + r")\s+an\s+([ivxlcdm]+|\d+)\b",
+        normalized,
+    )
+    if revolutionary_month_match:
+        return date_result(
+            None,
+            REVOLUTIONARY_MONTHS[revolutionary_month_match.group(1)],
+            None,
+            None,
+            "revolutionary_month",
+            source,
+            "french_republican",
+            "low",
+            "French Republican month detected, but no day was available for exact conversion.",
+        )
+
+    year_match = re.search(r"\b(1[5-9]\d{2}|20\d{2})\b", normalized)
+    if year_match:
+        year = int(year_match.group(1))
+        return date_result(
+            year,
+            None,
+            None,
+            None,
+            "year",
+            source,
+            "gregorian",
+            confidence,
+        )
+
+    return date_result(None, None, None, None, "unknown", "none", "unknown", "low")
+
+
+def parse_publication_date(
+    publication_date_raw: str | None,
+    title: str | None,
+    ocr_front_matter: str | None = None,
+) -> dict[str, str | int | None]:
+    """Parse the best available publication date from metadata, title, and OCR front matter."""
+    metadata_result = parse_date_from_text(
+        publication_date_raw,
+        source="metadata_date",
+        confidence="high",
+    )
+    if metadata_result["date_precision"] != "unknown":
+        return metadata_result
+
+    title_result = parse_date_from_text(
+        title,
+        source="title",
+        confidence="medium",
+    )
+    if title_result["date_precision"] != "unknown":
+        return title_result
+
+    ocr_result = parse_date_from_text(
+        ocr_front_matter,
+        source="ocr_front_matter",
+        confidence="low",
+    )
+    if ocr_result["date_precision"] != "unknown":
+        return ocr_result
+
+    return date_result(None, None, None, None, "unknown", "none", "unknown", "low")
 
 def parse_metadata_xml(raw_xml: str | None) -> tuple[str | None, ...]:
     """Parse one Internet Archive metadata XML document."""
@@ -144,29 +442,47 @@ def build_silver_documents(
         )
     )
 
-    year_candidate = F.regexp_extract(
-        F.coalesce(F.col("publication_date_raw"), F.lit("")),
-        r"(1[5-9]\d{2}|20\d{2})",
-        1,
-    )
-
-    parsed_metadata = parsed_metadata.withColumn(
-        "publication_year",
-        F.when(year_candidate != "", year_candidate.cast("int")).otherwise(
-            F.lit(None).cast("int")
-        ),
-    )
-
     ocr_documents = (
         spark.table(bronze_ocr_text_table)
-        .select("document_id")
+        .select(
+            "document_id",
+            F.substring(F.col("raw_text"), 1, 2000).alias("ocr_front_matter"),
+        )
         .distinct()
         .withColumn("has_ocr_text", F.lit(True))
     )
 
+    parsed_metadata = parsed_metadata.join(
+        ocr_documents,
+        on="document_id",
+        how="left",
+    )
+
+    parse_publication_date_udf = F.udf(parse_publication_date, DATE_PARSE_SCHEMA)
+
+    parsed_metadata = (
+        parsed_metadata.withColumn(
+            "parsed_date",
+            parse_publication_date_udf(
+                F.col("publication_date_raw"),
+                F.col("title"),
+                F.col("ocr_front_matter"),
+            ),
+        )
+        .withColumn("publication_year", F.col("parsed_date.publication_year"))
+        .withColumn("publication_month", F.col("parsed_date.publication_month"))
+        .withColumn("publication_day", F.col("parsed_date.publication_day"))
+        .withColumn("publication_date", F.to_date(F.col("parsed_date.publication_date")))
+        .withColumn("date_precision", F.col("parsed_date.date_precision"))
+        .withColumn("date_source", F.col("parsed_date.date_source"))
+        .withColumn("date_calendar", F.col("parsed_date.date_calendar"))
+        .withColumn("date_parse_confidence", F.col("parsed_date.date_parse_confidence"))
+        .withColumn("date_parse_notes", F.col("parsed_date.date_parse_notes"))
+        .drop("parsed_date")
+    )
+
     return (
-        parsed_metadata.join(ocr_documents, on="document_id", how="left")
-        .withColumn("has_ocr_text", F.coalesce(F.col("has_ocr_text"), F.lit(False)))
+        parsed_metadata.withColumn("has_ocr_text", F.coalesce(F.col("has_ocr_text"), F.lit(False)))
         .withColumn(
             "document_id_matches_metadata",
             F.when(F.col("metadata_document_id").isNull(), F.lit(None).cast("boolean"))
@@ -180,11 +496,20 @@ def build_silver_documents(
             "title",
             "author",
             "publication_year",
+            "publication_month",
+            "publication_day",
+            "publication_date",
             "publication_date_raw",
+            "date_precision",
+            "date_source",
+            "date_calendar",
+            "date_parse_confidence",
+            "date_parse_notes",
             "language",
             "internet_archive_id",
             "source_url",
             "has_ocr_text",
+            "ocr_front_matter",
             "metadata_parse_status",
             "metadata_parse_error",
             "metadata_file_path",

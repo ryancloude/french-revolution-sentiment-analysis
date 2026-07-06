@@ -18,3 +18,5 @@ resources:
         - environment_key: default
           spec:
             client: "4"
+            dependencies:
+              - convertdate==2.4.1

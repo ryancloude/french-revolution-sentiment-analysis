@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Analysis of rhetorical stance toward major French Revolution figures."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
-dependencies = []
+dependencies = ["convertdate>=2.4.1,<3.0"]
 
 [project.optional-dependencies]
 dev = [
