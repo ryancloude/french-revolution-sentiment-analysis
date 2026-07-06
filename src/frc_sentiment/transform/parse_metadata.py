@@ -61,32 +61,80 @@ def table_name(catalog: str, schema: str, table: str) -> str:
 
 FRENCH_MONTHS = {
     "janvier": 1,
+    "janv": 1,
+    "janv.": 1,
     "fevrier": 2,
+    "fevr": 2,
+    "fevr.": 2,
+    "fev": 2,
+    "fev.": 2,
     "mars": 3,
     "avril": 4,
+    "avr": 4,
+    "avr.": 4,
     "mai": 5,
     "juin": 6,
     "juillet": 7,
+    "juil": 7,
+    "juil.": 7,
     "aout": 8,
+    "aoust": 8,
     "septembre": 9,
+    "sept": 9,
+    "sept.": 9,
+    "7bre": 9,
     "octobre": 10,
+    "oct": 10,
+    "oct.": 10,
+    "8bre": 10,
     "novembre": 11,
+    "nov": 11,
+    "nov.": 11,
+    "9bre": 11,
     "decembre": 12,
+    "dec": 12,
+    "dec.": 12,
+    "10bre": 12,
+    "xbre": 12,
 }
 
 REVOLUTIONARY_MONTHS = {
     "vendemiaire": 1,
+    "vend": 1,
+    "vend.": 1,
     "brumaire": 2,
+    "brum": 2,
+    "brum.": 2,
     "frimaire": 3,
+    "frim": 3,
+    "frim.": 3,
     "nivose": 4,
+    "niv": 4,
+    "niv.": 4,
     "pluviose": 5,
+    "pluv": 5,
+    "pluv.": 5,
     "ventose": 6,
+    "vent": 6,
+    "vent.": 6,
     "germinal": 7,
+    "germ": 7,
+    "germ.": 7,
     "floreal": 8,
+    "flor": 8,
+    "flor.": 8,
     "prairial": 9,
+    "prair": 9,
+    "prair.": 9,
     "messidor": 10,
+    "mess": 10,
+    "mess.": 10,
     "thermidor": 11,
+    "therm": 11,
+    "therm.": 11,
     "fructidor": 12,
+    "fruct": 12,
+    "fruct.": 12,
 }
 
 
@@ -102,6 +150,7 @@ def normalize_date_text(value: str | None) -> str:
         return ""
 
     no_accents = strip_accents(value.lower())
+    no_accents = no_accents.replace("ſ", "s")
     normalized = no_accents.replace(",", " ").replace(".", " ").replace("'", " ")
     return " ".join(normalized.split())
 
@@ -311,6 +360,50 @@ def parse_date_from_text(
     return date_result(None, None, None, None, "unknown", "none", "unknown", "low")
 
 
+def date_precision_rank(parsed_date: dict[str, str | int | None]) -> int:
+    """Rank parsed dates by usefulness for chronological analysis."""
+    precision = parsed_date["date_precision"]
+
+    if precision == "day":
+        return 3
+    if precision == "month":
+        return 2
+    if precision in {"year", "revolutionary_month"}:
+        return 1
+
+    return 0
+
+
+def has_conflicting_year(
+    candidate: dict[str, str | int | None],
+    baseline_year: int | None,
+) -> bool:
+    """Return True when a candidate date conflicts with a known metadata year."""
+    candidate_year = candidate["publication_year"]
+
+    return (
+        baseline_year is not None
+        and candidate_year is not None
+        and candidate_year != baseline_year
+    )
+
+
+def append_date_note(
+    parsed_date: dict[str, str | int | None],
+    note: str,
+) -> dict[str, str | int | None]:
+    """Append a note to a parsed date result."""
+    updated = parsed_date.copy()
+    existing_notes = updated.get("date_parse_notes")
+
+    if existing_notes:
+        updated["date_parse_notes"] = f"{existing_notes} {note}"
+    else:
+        updated["date_parse_notes"] = note
+
+    return updated
+
+
 def parse_publication_date(
     publication_date_raw: str | None,
     title: str | None,
@@ -322,26 +415,54 @@ def parse_publication_date(
         source="metadata_date",
         confidence="high",
     )
-    if metadata_result["date_precision"] != "unknown":
-        return metadata_result
-
     title_result = parse_date_from_text(
         title,
         source="title",
         confidence="medium",
     )
-    if title_result["date_precision"] != "unknown":
-        return title_result
-
     ocr_result = parse_date_from_text(
         ocr_front_matter,
         source="ocr_front_matter",
         confidence="low",
     )
-    if ocr_result["date_precision"] != "unknown":
-        return ocr_result
 
-    return date_result(None, None, None, None, "unknown", "none", "unknown", "low")
+    candidates = [metadata_result, title_result, ocr_result]
+
+    metadata_year = metadata_result["publication_year"]
+
+    non_conflicting_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate["date_precision"] != "unknown"
+        and not has_conflicting_year(candidate, metadata_year)
+    ]
+
+    if not non_conflicting_candidates:
+        return date_result(None, None, None, None, "unknown", "none", "unknown", "low")
+
+    best_candidate = max(
+        non_conflicting_candidates,
+        key=lambda candidate: (
+            date_precision_rank(candidate),
+            # Tie-breaker: prefer more authoritative sources.
+            {"metadata_date": 3, "title": 2, "ocr_front_matter": 1}.get(
+                str(candidate["date_source"]),
+                0,
+            ),
+        ),
+    )
+
+    if (
+        best_candidate["date_source"] != "metadata_date"
+        and metadata_year is not None
+        and best_candidate["publication_year"] == metadata_year
+    ):
+        return append_date_note(
+            best_candidate,
+            "More precise date matched metadata year.",
+        )
+
+    return best_candidate
 
 def parse_metadata_xml(raw_xml: str | None) -> tuple[str | None, ...]:
     """Parse one Internet Archive metadata XML document."""

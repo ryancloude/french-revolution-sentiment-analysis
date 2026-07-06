@@ -141,3 +141,70 @@ def test_parse_revolutionary_date_from_ocr_front_matter() -> None:
     assert parsed["date_precision"] == "day"
     assert parsed["date_source"] == "ocr_front_matter"
     assert parsed["date_calendar"] == "french_republican"
+
+
+def test_ocr_front_matter_can_improve_metadata_year_when_year_matches() -> None:
+    """OCR front matter can improve a year-only metadata date when the year agrees."""
+    parsed = parse_publication_date(
+        publication_date_raw="1792",
+        title=None,
+        ocr_front_matter="Imprimé à Paris le 10 août 1792.",
+    )
+
+    assert parsed["publication_year"] == 1792
+    assert parsed["publication_month"] == 8
+    assert parsed["publication_day"] == 10
+    assert parsed["publication_date"] == "1792-08-10"
+    assert parsed["date_precision"] == "day"
+    assert parsed["date_source"] == "ocr_front_matter"
+
+
+def test_ocr_front_matter_does_not_override_conflicting_metadata_year() -> None:
+    """OCR front matter should not override a conflicting metadata year."""
+    parsed = parse_publication_date(
+        publication_date_raw="1789",
+        title=None,
+        ocr_front_matter="Imprimé à Paris le 10 août 1792.",
+    )
+
+    assert parsed["publication_year"] == 1789
+    assert parsed["publication_month"] is None
+    assert parsed["publication_day"] is None
+    assert parsed["publication_date"] is None
+    assert parsed["date_precision"] == "year"
+    assert parsed["date_source"] == "metadata_date"
+
+def test_parse_historical_aoust_spelling() -> None:
+    """Historical spelling aoust should parse as August."""
+    parsed = parse_publication_date(
+        publication_date_raw=None,
+        title="Lettre du 10 aoust 1792",
+    )
+
+    assert parsed["publication_date"] == "1792-08-10"
+    assert parsed["publication_month"] == 8
+    assert parsed["date_precision"] == "day"
+
+
+def test_parse_numeric_old_french_month_7bre() -> None:
+    """Old French 7bre notation should parse as September."""
+    parsed = parse_publication_date(
+        publication_date_raw=None,
+        title="Adresse du 5 7bre 1791",
+    )
+
+    assert parsed["publication_date"] == "1791-09-05"
+    assert parsed["publication_month"] == 9
+    assert parsed["date_precision"] == "day"
+
+
+def test_parse_abbreviated_revolutionary_month() -> None:
+    """Abbreviated Revolutionary calendar month should convert when day and year exist."""
+    parsed = parse_publication_date(
+        publication_date_raw=None,
+        title="Rapport du 9 therm an II",
+    )
+
+    assert parsed["publication_date"] == "1794-07-27"
+    assert parsed["date_calendar"] == "french_republican"
+    assert parsed["date_precision"] == "day"
