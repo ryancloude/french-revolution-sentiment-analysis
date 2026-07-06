@@ -9,6 +9,57 @@ from pyspark.sql import SparkSession
 
 VALID_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
+AI_EXTRACT_SCHEMA = """
+{
+  "publication_year": {
+    "type": "integer",
+    "description": "Publication year if explicitly supported by the text"
+  },
+  "publication_month": {
+    "type": "integer",
+    "description": "Publication month number 1-12 if explicitly supported by the text"
+  },
+  "publication_day": {
+    "type": "integer",
+    "description": "Publication day if explicitly supported by the text"
+  },
+  "publication_date": {
+    "type": "string",
+    "description": "Gregorian date in YYYY-MM-DD if exact day is known; null otherwise"
+  },
+  "date_precision": {
+    "type": "enum",
+    "labels": ["day", "month", "year", "unknown"],
+    "description": "Precision of extracted date"
+  },
+  "calendar": {
+    "type": "enum",
+    "labels": ["gregorian", "french_republican", "unknown"],
+    "description": "Calendar used by the evidence text"
+  },
+  "evidence": {
+    "type": "string",
+    "description": "Exact source text supporting the date"
+  },
+  "confidence": {
+    "type": "enum",
+    "labels": ["high", "medium", "low"],
+    "description": "Confidence in extraction"
+  }
+}
+"""
+
+AI_EXTRACT_INSTRUCTIONS = """
+Extract the most likely publication date of this French Revolution pamphlet.
+Prefer metadata date, then title, then OCR front matter.
+Do not use dates that only describe historical events unless they appear to be the
+publication or imprint date.
+Do not guess.
+If only a year is supported, return only the year and date_precision year.
+If month and year are supported, return date_precision month.
+If day, month, and year are supported, return date_precision day.
+"""
+
 
 def quote_identifier(identifier: str) -> str:
     """Validate and quote a Unity Catalog identifier."""
@@ -29,6 +80,11 @@ def table_name(catalog: str, schema: str, table: str) -> str:
     )
 
 
+def sql_string_literal(value: str) -> str:
+    """Escape a Python string as a single-quoted SQL string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 def build_ai_extract_date_candidates(
     spark: SparkSession,
     catalog: str,
@@ -37,6 +93,9 @@ def build_ai_extract_date_candidates(
     """Create AI-extracted publication date candidates."""
     documents_table = table_name(catalog, schema, "silver_documents")
     output_table = table_name(catalog, schema, "silver_date_candidates_ai_extract")
+
+    ai_extract_schema = sql_string_literal(AI_EXTRACT_SCHEMA)
+    ai_extract_instructions = sql_string_literal(AI_EXTRACT_INSTRUCTIONS)
 
     spark.sql(
         f"""
@@ -60,22 +119,13 @@ def build_ai_extract_date_candidates(
                 *,
                 ai_extract(
                     extraction_input,
-                    '{{
-                      "publication_year": {{"type": "integer", "description": "Publication year if explicitly supported by the text"}},
-                      "publication_month": {{"type": "integer", "description": "Publication month number 1-12 if explicitly supported by the text"}},
-                      "publication_day": {{"type": "integer", "description": "Publication day if explicitly supported by the text"}},
-                      "publication_date": {{"type": "string", "description": "Gregorian date in YYYY-MM-DD if exact day is known; null otherwise"}},
-                      "date_precision": {{"type": "enum", "labels": ["day", "month", "year", "unknown"], "description": "Precision of extracted date"}},
-                      "calendar": {{"type": "enum", "labels": ["gregorian", "french_republican", "unknown"], "description": "Calendar used by the evidence text"}},
-                      "evidence": {{"type": "string", "description": "Exact source text supporting the date"}},
-                      "confidence": {{"type": "enum", "labels": ["high", "medium", "low"], "description": "Confidence in extraction"}}
-                    }}',
+                    {ai_extract_schema},
                     options => map(
                         'version', '2.1',
                         'enableConfidenceScores', 'true',
                         'enableCitations', 'true',
                         'instructions',
-                        'Extract the most likely publication date of this French Revolution pamphlet. Prefer metadata date, then title, then OCR front matter. Do not use dates that only describe historical events unless they appear to be the publication or imprint date. Do not guess. If only a year is supported, return only the year and date_precision year. If month and year are supported, return date_precision month. If day, month, and year are supported, return date_precision day.'
+                        {ai_extract_instructions}
                     )
                 ) AS extracted
             FROM source_documents

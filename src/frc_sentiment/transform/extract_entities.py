@@ -142,6 +142,7 @@ def build_entity_mentions(
 ) -> DataFrame:
     """Build the silver entity mentions table."""
     clean_text_table = table_name(catalog, schema, "silver_clean_text")
+    selected_dates_table = table_name(catalog, schema, "silver_selected_publication_dates")
 
     figure_variants = get_figure_variants(spark, catalog, schema)
 
@@ -152,19 +153,47 @@ def build_entity_mentions(
     def extract_mentions_udf(clean_text_lower: str | None) -> list[dict[str, str | int | None]]:
         return extract_mentions_from_text(clean_text_lower, figure_variants)
 
-    documents = spark.table(clean_text_table).select(
+    selected_dates = spark.table(selected_dates_table).select(
         "document_id",
-        "publication_year",
-        "title",
-        "clean_text_lower",
-        "ocr_quality_flag",
+        "selected_publication_year",
+        "selected_publication_month",
+        "selected_publication_day",
+        "selected_publication_date",
+        "selected_date_precision",
+        "selected_date_calendar",
+        "selected_extractor_name",
+        "selected_source_field",
+        "selected_confidence",
+        "selected_evidence",
+        "conflicts_with_metadata_year",
+    )
+
+    documents = (
+        spark.table(clean_text_table)
+        .select(
+            "document_id",
+            "title",
+            "clean_text_lower",
+            "ocr_quality_flag",
+        )
+        .join(selected_dates, on="document_id", how="left")
     )
 
     mentions = (
         documents.withColumn("mentions", extract_mentions_udf(F.col("clean_text_lower")))
         .select(
             "document_id",
-            "publication_year",
+            "selected_publication_year",
+            "selected_publication_month",
+            "selected_publication_day",
+            "selected_publication_date",
+            "selected_date_precision",
+            "selected_date_calendar",
+            "selected_extractor_name",
+            "selected_source_field",
+            "selected_confidence",
+            "selected_evidence",
+            "conflicts_with_metadata_year",
             "title",
             "ocr_quality_flag",
             F.explode_outer("mentions").alias("mention"),
@@ -183,7 +212,17 @@ def build_entity_mentions(
                 256,
             ).alias("mention_id"),
             "document_id",
-            "publication_year",
+            F.col("selected_publication_year").alias("publication_year"),
+            F.col("selected_publication_month").alias("publication_month"),
+            F.col("selected_publication_day").alias("publication_day"),
+            F.col("selected_publication_date").alias("publication_date"),
+            F.col("selected_date_precision").alias("date_precision"),
+            F.col("selected_date_calendar").alias("date_calendar"),
+            F.col("selected_extractor_name").alias("date_extractor_name"),
+            F.col("selected_source_field").alias("date_source_field"),
+            F.col("selected_confidence").alias("date_confidence"),
+            F.col("selected_evidence").alias("date_evidence"),
+            "conflicts_with_metadata_year",
             "title",
             "ocr_quality_flag",
             F.col("mention.figure_id").alias("figure_id"),
