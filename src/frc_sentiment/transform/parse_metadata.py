@@ -16,7 +16,12 @@ PARSED_METADATA_SCHEMA = T.StructType(
     [
         T.StructField("metadata_document_id", T.StringType(), True),
         T.StructField("title", T.StringType(), True),
+        T.StructField("creator", T.StringType(), True),
         T.StructField("author", T.StringType(), True),
+        T.StructField("creators", T.ArrayType(T.StringType()), True),
+        T.StructField("metadata_authors", T.ArrayType(T.StringType()), True),
+        T.StructField("subjects", T.ArrayType(T.StringType()), True),
+        T.StructField("subjects_raw", T.StringType(), True),
         T.StructField("publication_date_raw", T.StringType(), True),
         T.StructField("language", T.StringType(), True),
         T.StructField("internet_archive_id", T.StringType(), True),
@@ -464,7 +469,7 @@ def parse_publication_date(
 
     return best_candidate
 
-def parse_metadata_xml(raw_xml: str | None) -> tuple[str | None, ...]:
+def parse_metadata_xml(raw_xml: str | None) -> tuple:
     """Parse one Internet Archive metadata XML document."""
     import xml.etree.ElementTree as ET
 
@@ -475,33 +480,34 @@ def parse_metadata_xml(raw_xml: str | None) -> tuple[str | None, ...]:
         cleaned = " ".join(value.split())
         return cleaned or None
 
-    if not raw_xml:
+    def empty_parse_result(
+        status: str,
+        error: str | None,
+    ) -> tuple:
         return (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "parse_error",
-            "Empty XML document",
+            None,  # metadata_document_id
+            None,  # title
+            None,  # creator
+            None,  # author
+            [],  # creators
+            [],  # metadata_authors
+            [],  # subjects
+            None,  # subjects_raw
+            None,  # publication_date_raw
+            None,  # language
+            None,  # internet_archive_id
+            None,  # source_url
+            status,
+            error,
         )
+
+    if not raw_xml:
+        return empty_parse_result("parse_error", "Empty XML document")
 
     try:
         root = ET.fromstring(raw_xml)
     except Exception as exc:
-        return (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "parse_error",
-            str(exc)[:500],
-        )
+        return empty_parse_result("parse_error", str(exc)[:500])
 
     def get_first(*tags: str) -> str | None:
         for tag in tags:
@@ -513,18 +519,44 @@ def parse_metadata_xml(raw_xml: str | None) -> tuple[str | None, ...]:
 
         return None
 
+    def get_all(tag: str) -> list[str]:
+        values = []
+
+        for element in root.findall(tag):
+            value = clean_text(element.text)
+            if value and value not in values:
+                values.append(value)
+
+        return values
+
+    creators = get_all("creator")
+    metadata_authors = get_all("author")
+    subjects = get_all("subject")
+
+    creator = creators[0] if creators else None
+
+    # Keep the existing broad "author" field for compatibility.
+    # Prefer creator because Internet Archive metadata commonly uses creator
+    # as the primary author/creator field.
+    author = creator or (metadata_authors[0] if metadata_authors else None)
+
     metadata_document_id = get_first("identifier")
     title = get_first("title")
-    author = get_first("creator", "author")
     publication_date_raw = get_first("date")
     language = get_first("language")
     internet_archive_id = get_first("identifier")
     source_url = get_first("identifier-access")
+    subjects_raw = "; ".join(subjects) if subjects else None
 
     return (
         metadata_document_id,
         title,
+        creator,
         author,
+        creators,
+        metadata_authors,
+        subjects,
+        subjects_raw,
         publication_date_raw,
         language,
         internet_archive_id,
@@ -553,7 +585,12 @@ def build_silver_documents(
             F.col("file_path").alias("metadata_file_path"),
             F.col("parsed.metadata_document_id"),
             F.col("parsed.title"),
+            F.col("parsed.creator"),
             F.col("parsed.author"),
+            F.col("parsed.creators"),
+            F.col("parsed.metadata_authors"),
+            F.col("parsed.subjects"),
+            F.col("parsed.subjects_raw"),
             F.col("parsed.publication_date_raw"),
             F.col("parsed.language"),
             F.col("parsed.internet_archive_id"),
@@ -615,7 +652,12 @@ def build_silver_documents(
             "metadata_document_id",
             "document_id_matches_metadata",
             "title",
+            "creator",
             "author",
+            "creators",
+            "metadata_authors",
+            "subjects",
+            "subjects_raw",
             "publication_year",
             "publication_month",
             "publication_day",
