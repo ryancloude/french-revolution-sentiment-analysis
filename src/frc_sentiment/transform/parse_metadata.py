@@ -1,4 +1,4 @@
-"""Parse bronze metadata XML into the silver documents table."""
+"""Parse bronze metadata into dimensional silver document/date tables."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 import re
 import unicodedata
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
@@ -63,6 +63,7 @@ def table_name(catalog: str, schema: str, table: str) -> str:
             quote_identifier(table),
         ]
     )
+
 
 FRENCH_MONTHS = {
     "janvier": 1,
@@ -155,7 +156,7 @@ def normalize_date_text(value: str | None) -> str:
         return ""
 
     no_accents = strip_accents(value.lower())
-    no_accents = no_accents.replace("ſ", "s")
+    no_accents = no_accents.replace("Å¿", "s")
     normalized = no_accents.replace(",", " ").replace(".", " ").replace("'", " ")
     return " ".join(normalized.split())
 
@@ -239,7 +240,10 @@ def parse_date_from_text(
     if not normalized:
         return date_result(None, None, None, None, "unknown", "none", "unknown", "low")
 
-    iso_match = re.search(r"\b(1[5-9]\d{2}|20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", normalized)
+    iso_match = re.search(
+        r"\b(1[5-9]\d{2}|20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b",
+        normalized,
+    )
     if iso_match:
         year = int(iso_match.group(1))
         month = int(iso_match.group(2))
@@ -449,7 +453,6 @@ def parse_publication_date(
         non_conflicting_candidates,
         key=lambda candidate: (
             date_precision_rank(candidate),
-            # Tie-breaker: prefer more authoritative sources.
             {"metadata_date": 3, "title": 2, "ocr_front_matter": 1}.get(
                 str(candidate["date_source"]),
                 0,
@@ -469,6 +472,7 @@ def parse_publication_date(
 
     return best_candidate
 
+
 def parse_metadata_xml(raw_xml: str | None) -> tuple:
     """Parse one Internet Archive metadata XML document."""
     import xml.etree.ElementTree as ET
@@ -485,18 +489,18 @@ def parse_metadata_xml(raw_xml: str | None) -> tuple:
         error: str | None,
     ) -> tuple:
         return (
-            None,  # metadata_document_id
-            None,  # title
-            None,  # creator
-            None,  # author
-            [],  # creators
-            [],  # metadata_authors
-            [],  # subjects
-            None,  # subjects_raw
-            None,  # publication_date_raw
-            None,  # language
-            None,  # internet_archive_id
-            None,  # source_url
+            None,
+            None,
+            None,
+            None,
+            [],
+            [],
+            [],
+            None,
+            None,
+            None,
+            None,
+            None,
             status,
             error,
         )
@@ -534,10 +538,6 @@ def parse_metadata_xml(raw_xml: str | None) -> tuple:
     subjects = get_all("subject")
 
     creator = creators[0] if creators else None
-
-    # Keep the existing broad "author" field for compatibility.
-    # Prefer creator because Internet Archive metadata commonly uses creator
-    # as the primary author/creator field.
     author = creator or (metadata_authors[0] if metadata_authors else None)
 
     metadata_document_id = get_first("identifier")
@@ -566,16 +566,48 @@ def parse_metadata_xml(raw_xml: str | None) -> tuple:
     )
 
 
-def build_silver_documents(
+def date_key_columns(
+    publication_year: Column,
+    publication_month: Column,
+    publication_day: Column,
+    date_precision: Column,
+    date_calendar: Column,
+) -> Column:
+    """Build a stable date key from selected publication date attributes."""
+    return F.sha2(
+        F.concat_ws(
+            "|",
+            F.coalesce(publication_year.cast("string"), F.lit("unknown")),
+            F.coalesce(publication_month.cast("string"), F.lit("unknown")),
+            F.coalesce(publication_day.cast("string"), F.lit("unknown")),
+            F.coalesce(date_precision, F.lit("unknown")),
+            F.coalesce(date_calendar, F.lit("unknown")),
+        ),
+        256,
+    )
+
+
+def creator_id_column(creator_name: Column) -> Column:
+    """Build a stable creator identifier."""
+    return F.sha2(F.lower(F.trim(creator_name)), 256)
+
+
+def subject_id_column(subject: Column) -> Column:
+    """Build a stable subject identifier."""
+    return F.sha2(F.lower(F.trim(subject)), 256)
+
+
+def build_parsed_documents(
     spark: SparkSession,
     catalog: str,
     schema: str,
 ) -> DataFrame:
-    """Build the silver documents DataFrame from bronze metadata and OCR tables."""
+    """Build parsed document metadata with selected rule-based publication dates."""
     bronze_metadata_table = table_name(catalog, schema, "bronze_metadata")
     bronze_ocr_text_table = table_name(catalog, schema, "bronze_ocr_text")
 
     parse_metadata_udf = F.udf(parse_metadata_xml, PARSED_METADATA_SCHEMA)
+    parse_publication_date_udf = F.udf(parse_publication_date, DATE_PARSE_SCHEMA)
 
     parsed_metadata = (
         spark.table(bronze_metadata_table)
@@ -610,16 +642,15 @@ def build_silver_documents(
         .withColumn("has_ocr_text", F.lit(True))
     )
 
-    parsed_metadata = parsed_metadata.join(
-        ocr_documents,
-        on="document_id",
-        how="left",
-    )
-
-    parse_publication_date_udf = F.udf(parse_publication_date, DATE_PARSE_SCHEMA)
-
-    parsed_metadata = (
-        parsed_metadata.withColumn(
+    return (
+        parsed_metadata.join(ocr_documents, on="document_id", how="left")
+        .withColumn("has_ocr_text", F.coalesce(F.col("has_ocr_text"), F.lit(False)))
+        .withColumn(
+            "document_id_matches_metadata",
+            F.when(F.col("metadata_document_id").isNull(), F.lit(None).cast("boolean"))
+            .otherwise(F.col("document_id") == F.col("metadata_document_id")),
+        )
+        .withColumn(
             "parsed_date",
             parse_publication_date_udf(
                 F.col("publication_date_raw"),
@@ -634,55 +665,257 @@ def build_silver_documents(
         .withColumn("date_precision", F.col("parsed_date.date_precision"))
         .withColumn("date_source", F.col("parsed_date.date_source"))
         .withColumn("date_calendar", F.col("parsed_date.date_calendar"))
-        .withColumn("date_parse_confidence", F.col("parsed_date.date_parse_confidence"))
+        .withColumn("date_confidence", F.col("parsed_date.date_parse_confidence"))
         .withColumn("date_parse_notes", F.col("parsed_date.date_parse_notes"))
+        .withColumn(
+            "date_key",
+            date_key_columns(
+                F.col("publication_year"),
+                F.col("publication_month"),
+                F.col("publication_day"),
+                F.col("date_precision"),
+                F.col("date_calendar"),
+            ),
+        )
+        .withColumn("parsed_at", F.current_timestamp())
         .drop("parsed_date")
     )
 
+
+def build_silver_dim_documents(parsed_documents: DataFrame) -> DataFrame:
+    """Build document dimension."""
+    return parsed_documents.select(
+        "document_id",
+        "metadata_document_id",
+        "document_id_matches_metadata",
+        "date_key",
+        "title",
+        "creator",
+        "author",
+        "publication_date_raw",
+        "date_source",
+        "date_confidence",
+        "date_parse_notes",
+        "language",
+        "internet_archive_id",
+        "source_url",
+        "has_ocr_text",
+        "ocr_front_matter",
+        "metadata_parse_status",
+        "metadata_parse_error",
+        "metadata_file_path",
+        "parsed_at",
+    )
+
+
+def build_silver_dim_dates(parsed_documents: DataFrame) -> DataFrame:
+    """Build reusable selected publication date dimension."""
     return (
-        parsed_metadata.withColumn("has_ocr_text", F.coalesce(F.col("has_ocr_text"), F.lit(False)))
-        .withColumn(
-            "document_id_matches_metadata",
-            F.when(F.col("metadata_document_id").isNull(), F.lit(None).cast("boolean"))
-            .otherwise(F.col("document_id") == F.col("metadata_document_id")),
-        )
-        .withColumn("parsed_at", F.current_timestamp())
-        .select(
-            "document_id",
-            "metadata_document_id",
-            "document_id_matches_metadata",
-            "title",
-            "creator",
-            "author",
-            "creators",
-            "metadata_authors",
-            "subjects",
-            "subjects_raw",
+        parsed_documents.select(
+            "date_key",
             "publication_year",
             "publication_month",
             "publication_day",
             "publication_date",
-            "publication_date_raw",
             "date_precision",
-            "date_source",
             "date_calendar",
-            "date_parse_confidence",
-            "date_parse_notes",
-            "language",
-            "internet_archive_id",
-            "source_url",
-            "has_ocr_text",
-            "ocr_front_matter",
-            "metadata_parse_status",
-            "metadata_parse_error",
-            "metadata_file_path",
-            "parsed_at",
         )
+        .distinct()
+        .withColumn(
+            "period_label",
+            F.when(F.col("publication_year").isNull(), F.lit("Unknown"))
+            .when(F.col("publication_month").isNull(), F.col("publication_year").cast("string"))
+            .otherwise(
+                F.concat_ws(
+                    "-",
+                    F.col("publication_year").cast("string"),
+                    F.lpad(F.col("publication_month").cast("string"), 2, "0"),
+                )
+            ),
+        )
+        .withColumn("has_publication_year", F.col("publication_year").isNotNull())
+        .withColumn("has_publication_month", F.col("publication_month").isNotNull())
+        .withColumn("has_publication_day", F.col("publication_day").isNotNull())
     )
 
 
-def write_silver_documents(df: DataFrame, full_table_name: str) -> None:
-    """Write the silver documents Delta table."""
+def build_creator_entries(parsed_documents: DataFrame) -> DataFrame:
+    """Build document creator/author rows before dimension and bridge tables."""
+    creators = (
+        parsed_documents.select(
+            "document_id",
+            F.posexplode_outer("creators").alias("creator_position", "creator_name"),
+        )
+        .filter(F.col("creator_name").isNotNull())
+        .withColumn("creator_source", F.lit("creator"))
+    )
+
+    metadata_authors = (
+        parsed_documents.select(
+            "document_id",
+            F.posexplode_outer("metadata_authors").alias(
+                "creator_position",
+                "creator_name",
+            ),
+        )
+        .filter(F.col("creator_name").isNotNull())
+        .withColumn("creator_source", F.lit("author"))
+    )
+
+    fallback_authors = (
+        parsed_documents.filter(
+            (F.size(F.col("creators")) == F.lit(0))
+            & (F.size(F.col("metadata_authors")) == F.lit(0))
+            & F.col("author").isNotNull()
+        )
+        .select(
+            "document_id",
+            F.lit(0).alias("creator_position"),
+            F.col("author").alias("creator_name"),
+        )
+        .withColumn("creator_source", F.lit("display_author"))
+    )
+
+    unknown_authors = (
+        parsed_documents.filter(
+            (F.size(F.col("creators")) == F.lit(0))
+            & (F.size(F.col("metadata_authors")) == F.lit(0))
+            & F.col("author").isNull()
+        )
+        .select(
+            "document_id",
+            F.lit(0).alias("creator_position"),
+            F.lit("Unknown").alias("creator_name"),
+        )
+        .withColumn("creator_source", F.lit("unknown"))
+    )
+
+    return (
+        creators.unionByName(metadata_authors)
+        .unionByName(fallback_authors)
+        .unionByName(unknown_authors)
+        .withColumn("creator_id", creator_id_column(F.col("creator_name")))
+    )
+
+
+def build_silver_dim_creators(creator_entries: DataFrame) -> DataFrame:
+    """Build creator/author dimension."""
+    return (
+        creator_entries.select("creator_id", "creator_name")
+        .distinct()
+        .orderBy("creator_name")
+    )
+
+
+def build_silver_bridge_document_creators(creator_entries: DataFrame) -> DataFrame:
+    """Build document-to-creator bridge."""
+    return creator_entries.select(
+        "document_id",
+        "creator_id",
+        "creator_source",
+        "creator_position",
+    ).distinct()
+
+
+def build_subject_entries(parsed_documents: DataFrame) -> DataFrame:
+    """Build document subject rows before dimension and bridge tables."""
+    explicit_subjects = (
+        parsed_documents.select(
+            "document_id",
+            F.posexplode_outer("subjects").alias("subject_position", "subject"),
+        )
+        .filter(F.col("subject").isNotNull())
+        .withColumn("subject_source", F.lit("metadata_subject"))
+    )
+
+    unknown_subjects = (
+        parsed_documents.filter(F.size(F.col("subjects")) == F.lit(0))
+        .select(
+            "document_id",
+            F.lit(0).alias("subject_position"),
+            F.lit("Unknown").alias("subject"),
+        )
+        .withColumn("subject_source", F.lit("unknown"))
+    )
+
+    return explicit_subjects.unionByName(unknown_subjects).withColumn(
+        "subject_id",
+        subject_id_column(F.col("subject")),
+    )
+
+
+def build_silver_dim_subjects(subject_entries: DataFrame) -> DataFrame:
+    """Build subject dimension."""
+    return subject_entries.select("subject_id", "subject").distinct().orderBy("subject")
+
+
+def build_silver_bridge_document_subjects(subject_entries: DataFrame) -> DataFrame:
+    """Build document-to-subject bridge."""
+    return subject_entries.select(
+        "document_id",
+        "subject_id",
+        "subject_source",
+        "subject_position",
+    ).distinct()
+
+
+def build_silver_publication_date_candidates(parsed_documents: DataFrame) -> DataFrame:
+    """Build rule-based publication date candidate audit table."""
+    return (
+        parsed_documents.select(
+            "document_id",
+            F.sha2(
+                F.concat_ws(
+                    "|",
+                    F.col("document_id"),
+                    F.lit("rule_based_selected"),
+                    F.coalesce(F.col("date_source"), F.lit("unknown")),
+                ),
+                256,
+            ).alias("date_candidate_id"),
+            F.col("publication_year").alias("candidate_publication_year"),
+            F.col("publication_month").alias("candidate_publication_month"),
+            F.col("publication_day").alias("candidate_publication_day"),
+            F.col("publication_date").alias("candidate_publication_date"),
+            F.col("date_precision").alias("candidate_date_precision"),
+            F.col("date_calendar").alias("candidate_date_calendar"),
+            F.col("date_source").alias("candidate_source_field"),
+            F.col("date_confidence").alias("candidate_confidence"),
+            F.col("date_parse_notes").alias("candidate_notes"),
+            F.col("publication_date_raw"),
+            F.col("title"),
+            F.col("ocr_front_matter"),
+        )
+        .withColumn("extractor_name", F.lit("rule_based_metadata_title_ocr"))
+        .withColumn("extractor_version", F.lit("1"))
+        .withColumn("selected_for_document", F.lit(True))
+        .withColumn("created_at", F.current_timestamp())
+    )
+
+
+def build_silver_fact_documents(parsed_documents: DataFrame) -> DataFrame:
+    """Build document-level fact table with measurable pipeline facts."""
+    return parsed_documents.select(
+        "document_id",
+        "date_key",
+        F.col("has_ocr_text").cast("boolean").alias("has_ocr_text"),
+        F.col("publication_year").isNotNull().alias("has_valid_publication_year"),
+        F.col("publication_month").isNotNull().alias("has_publication_month"),
+        F.col("publication_day").isNotNull().alias("has_publication_day"),
+        (F.col("metadata_parse_status") == F.lit("success")).alias(
+            "metadata_parse_success_flag"
+        ),
+        (
+            F.col("publication_year").isNotNull()
+            & (F.col("metadata_parse_status") == F.lit("success"))
+            & F.col("has_ocr_text")
+        ).alias("included_in_analysis_flag"),
+        F.current_timestamp().alias("created_at"),
+    )
+
+
+def write_delta_table(df: DataFrame, full_table_name: str) -> None:
+    """Write a Delta table."""
     row_count = df.count()
 
     if row_count == 0:
@@ -698,6 +931,45 @@ def write_silver_documents(df: DataFrame, full_table_name: str) -> None:
     print(f"Wrote {row_count} rows to {full_table_name}")
 
 
+def build_and_write_document_model(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> None:
+    """Build and write the phase 1 dimensional document model."""
+    parsed_documents = build_parsed_documents(
+        spark=spark,
+        catalog=catalog,
+        schema=schema,
+    )
+
+    creator_entries = build_creator_entries(parsed_documents)
+    subject_entries = build_subject_entries(parsed_documents)
+
+    outputs = {
+        "silver_dim_documents": build_silver_dim_documents(parsed_documents),
+        "silver_dim_dates": build_silver_dim_dates(parsed_documents),
+        "silver_dim_creators": build_silver_dim_creators(creator_entries),
+        "silver_bridge_document_creators": build_silver_bridge_document_creators(
+            creator_entries
+        ),
+        "silver_dim_subjects": build_silver_dim_subjects(subject_entries),
+        "silver_bridge_document_subjects": build_silver_bridge_document_subjects(
+            subject_entries
+        ),
+        "silver_publication_date_candidates": build_silver_publication_date_candidates(
+            parsed_documents
+        ),
+        "silver_fact_documents": build_silver_fact_documents(parsed_documents),
+    }
+
+    for output_table, output_df in outputs.items():
+        write_delta_table(
+            output_df,
+            table_name(catalog, schema, output_table),
+        )
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
@@ -707,19 +979,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Parse bronze metadata into silver documents."""
+    """Build dimensional silver document/date tables."""
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
 
-    silver_documents = build_silver_documents(
+    build_and_write_document_model(
         spark=spark,
         catalog=args.catalog,
         schema=args.schema,
-    )
-
-    write_silver_documents(
-        silver_documents,
-        table_name(args.catalog, args.schema, "silver_documents"),
     )
 
 

@@ -1,10 +1,10 @@
 resources:
   jobs:
-    silver_metadata:
-      name: ${bundle.target}-frc-silver-metadata
+    silver_document_model:
+      name: ${bundle.target}-frc-silver-document-model
 
       tasks:
-        - task_key: parse_metadata
+        - task_key: build_document_model
           spark_python_task:
             python_file: ../src/frc_sentiment/transform/parse_metadata.py
             parameters:
