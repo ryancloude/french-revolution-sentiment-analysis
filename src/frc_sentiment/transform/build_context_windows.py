@@ -1,4 +1,4 @@
-"""Build context windows around detected figure mentions."""
+"""Build mention context text dimension around detected figure mentions."""
 
 from __future__ import annotations
 
@@ -118,16 +118,16 @@ def build_context_for_mention(
     }
 
 
-def build_context_windows(
+def build_dim_mention_contexts(
     spark: SparkSession,
     catalog: str,
     schema: str,
     words_before: int,
     words_after: int,
 ) -> DataFrame:
-    """Build context windows for each entity mention."""
-    mentions_table = table_name(catalog, schema, "silver_entity_mentions")
-    clean_text_table = table_name(catalog, schema, "silver_clean_text")
+    """Build context text for each figure mention."""
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    document_text_table = table_name(catalog, schema, "silver_dim_document_text")
 
     @F.udf(returnType=CONTEXT_SCHEMA)
     def context_window_udf(
@@ -143,16 +143,21 @@ def build_context_windows(
             words_after=words_after,
         )
 
-    mentions = spark.table(mentions_table)
+    mentions = spark.table(mentions_table).select(
+        "mention_id",
+        "document_id",
+        "match_start_char",
+        "match_end_char",
+    )
 
-    clean_text = spark.table(clean_text_table).select(
+    document_text = spark.table(document_text_table).select(
         "document_id",
         "clean_text",
         "file_path",
     )
 
     return (
-        mentions.join(clean_text, on="document_id", how="left")
+        mentions.join(document_text, on="document_id", how="left")
         .withColumn(
             "context",
             context_window_udf(
@@ -164,28 +169,6 @@ def build_context_windows(
         .select(
             "mention_id",
             "document_id",
-            "figure_id",
-            "canonical_name",
-            "matched_variant",
-            "variant_normalized",
-            "variant_type",
-            "match_confidence",
-            "match_method",
-            "publication_year",
-            "publication_month",
-            "publication_day",
-            "publication_date",
-            "date_precision",
-            "date_calendar",
-            "date_extractor_name",
-            "date_source_field",
-            "date_confidence",
-            "date_evidence",
-            "conflicts_with_metadata_year",
-            "title",
-            "ocr_quality_flag",
-            "match_start_char",
-            "match_end_char",
             F.lit(words_before).alias("words_before_requested"),
             F.lit(words_after).alias("words_after_requested"),
             F.col("context.words_before_actual").alias("words_before_actual"),
@@ -197,6 +180,7 @@ def build_context_windows(
             "file_path",
             F.current_timestamp().alias("context_extracted_at"),
         )
+        .orderBy("document_id", "context_start_char", "mention_id")
     )
 
 
@@ -225,11 +209,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Create silver context windows."""
+    """Create silver mention context dimension."""
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
 
-    context_windows = build_context_windows(
+    mention_contexts = build_dim_mention_contexts(
         spark=spark,
         catalog=args.catalog,
         schema=args.schema,
@@ -238,8 +222,8 @@ def main() -> None:
     )
 
     write_delta_table(
-        context_windows,
-        table_name(args.catalog, args.schema, "silver_context_windows"),
+        mention_contexts,
+        table_name(args.catalog, args.schema, "silver_dim_mention_contexts"),
     )
 
 

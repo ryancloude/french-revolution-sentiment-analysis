@@ -1,10 +1,10 @@
 resources:
   jobs:
-    silver_context_windows:
-      name: ${bundle.target}-frc-silver-context-windows
+    silver_mention_contexts:
+      name: ${bundle.target}-frc-silver-mention-contexts
 
       tasks:
-        - task_key: build_context_windows
+        - task_key: build_mention_contexts
           spark_python_task:
             python_file: ../src/frc_sentiment/transform/build_context_windows.py
             parameters:
