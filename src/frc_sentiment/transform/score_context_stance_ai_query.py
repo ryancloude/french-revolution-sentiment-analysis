@@ -29,6 +29,27 @@ Important rules:
 - Evidence text must be a short exact phrase from the original context.
 - Translate only the evidence phrase into English.
 
+Stance label rules:
+- positive means the passage praises, defends, legitimizes, admires, or supports the target.
+- negative means the passage criticizes, condemns, mocks, attacks, blames, or delegitimizes
+  the target.
+- neutral_or_unclear means the stance is factual, ambiguous, unclear, not about the target,
+  or too damaged by OCR to classify.
+
+Stance intensity rules:
+- none: no clear positive or negative stance.
+- weak: mild praise or criticism.
+- moderate: clear praise or criticism, but not extreme.
+- strong: intense praise, intense condemnation, severe accusation, or highly charged rhetoric.
+- If stance_label is neutral_or_unclear, stance_intensity must be none.
+- If stance_label is positive or negative, stance_intensity must be weak, moderate, or strong.
+
+Target relevance rules:
+- direct: the stance clearly targets the named figure.
+- indirect: the figure is relevant, but the stance is partly about a related group, event,
+  institution, or action.
+- not_relevant: the figure is only mentioned incidentally, or the stance is not about the figure.
+
 Return exactly one JSON object.
 Do not use markdown.
 Do not wrap the JSON in ```json fences.
@@ -38,7 +59,7 @@ The first character must be { and the last character must be }.
 Return only valid JSON with these fields:
 {
   "stance_label": "positive | negative | neutral_or_unclear",
-  "stance_score": number between -1 and 1,
+  "stance_intensity": "none | weak | moderate | strong",
   "stance_confidence": "high | medium | low",
   "target_relevance": "direct | indirect | not_relevant",
   "evidence_text": "short exact phrase from the French context, or null",
@@ -167,8 +188,11 @@ def build_context_stance_ai_query(
                 lower(
                     cast(variant_get(response_json, '$.stance_label', 'string') AS string)
                 ) AS stance_label_raw,
+                lower(
+                    cast(variant_get(response_json, '$.stance_intensity', 'string') AS string)
+                ) AS stance_intensity_raw,
                 cast(variant_get(response_json, '$.stance_score', 'double') AS double)
-                    AS stance_score_raw,
+                    AS model_stance_score_raw,
                 lower(
                     cast(variant_get(response_json, '$.stance_confidence', 'string') AS string)
                 ) AS stance_confidence_raw,
@@ -184,6 +208,42 @@ def build_context_stance_ai_query(
                 cast(variant_get(response_json, '$.explanation', 'string') AS string)
                     AS explanation
             FROM parsed
+        ),
+
+        validated AS (
+            SELECT
+                *,
+
+                CASE
+                    WHEN stance_label_raw IN ('positive', 'negative', 'neutral_or_unclear')
+                        THEN stance_label_raw
+                    ELSE 'neutral_or_unclear'
+                END AS stance_label,
+
+                CASE
+                    WHEN stance_label_raw = 'neutral_or_unclear'
+                        THEN 'none'
+                    WHEN stance_label_raw IN ('positive', 'negative')
+                         AND stance_intensity_raw IN ('weak', 'moderate', 'strong')
+                        THEN stance_intensity_raw
+                    WHEN stance_label_raw IN ('positive', 'negative')
+                        THEN 'weak'
+                    ELSE 'none'
+                END AS stance_intensity,
+
+                CASE
+                    WHEN stance_confidence_raw IN ('high', 'medium', 'low')
+                        THEN stance_confidence_raw
+                    ELSE 'low'
+                END AS stance_confidence,
+
+                CASE
+                    WHEN target_relevance_raw IN ('direct', 'indirect', 'not_relevant')
+                        THEN target_relevance_raw
+                    ELSE 'not_relevant'
+                END AS target_relevance
+
+            FROM normalized
         )
 
         SELECT
@@ -225,30 +285,24 @@ def build_context_stance_ai_query(
             'databricks_ai_query' AS stance_method,
             {model_name} AS stance_model,
 
-            CASE
-                WHEN stance_label_raw IN ('positive', 'negative', 'neutral_or_unclear')
-                    THEN stance_label_raw
-                ELSE 'neutral_or_unclear'
-            END AS stance_label,
+            stance_label,
+            stance_intensity,
 
             CASE
-                WHEN stance_score_raw < -1 THEN -1.0
-                WHEN stance_score_raw > 1 THEN 1.0
-                WHEN stance_score_raw IS NULL THEN 0.0
-                ELSE stance_score_raw
+                WHEN stance_label = 'negative' AND stance_intensity = 'strong' THEN -1.0
+                WHEN stance_label = 'negative' AND stance_intensity = 'moderate' THEN -0.66
+                WHEN stance_label = 'negative' AND stance_intensity = 'weak' THEN -0.33
+                WHEN stance_label = 'positive' AND stance_intensity = 'weak' THEN 0.33
+                WHEN stance_label = 'positive' AND stance_intensity = 'moderate' THEN 0.66
+                WHEN stance_label = 'positive' AND stance_intensity = 'strong' THEN 1.0
+                ELSE 0.0
             END AS stance_score,
 
-            CASE
-                WHEN stance_confidence_raw IN ('high', 'medium', 'low')
-                    THEN stance_confidence_raw
-                ELSE 'low'
-            END AS stance_confidence,
+            'deterministic_label_intensity_mapping' AS stance_score_method,
+            model_stance_score_raw,
 
-            CASE
-                WHEN target_relevance_raw IN ('direct', 'indirect', 'not_relevant')
-                    THEN target_relevance_raw
-                ELSE 'not_relevant'
-            END AS target_relevance,
+            stance_confidence,
+            target_relevance,
 
             evidence_text,
             evidence_translation_en,
@@ -258,7 +312,7 @@ def build_context_stance_ai_query(
             prompt,
             current_timestamp() AS stance_scored_at
 
-        FROM normalized
+        FROM validated
         """
     )
 
