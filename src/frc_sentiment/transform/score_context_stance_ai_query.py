@@ -1,11 +1,11 @@
-"""Classify target-specific stance in context windows using Databricks ai_query."""
+"""Classify target-specific stance and update dimensional silver stance tables."""
 
 from __future__ import annotations
 
 import argparse
 import re
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 
 VALID_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
@@ -99,55 +99,65 @@ def build_context_stance_ai_query(
     schema: str,
     model: str,
     limit: int | None,
-) -> None:
-    """Create AI stance classifications for context windows."""
-    context_windows_table = table_name(catalog, schema, "silver_context_windows")
-    output_table = table_name(catalog, schema, "silver_context_stance_ai_query")
+) -> DataFrame:
+    """Create normalized AI stance classifications for mention contexts."""
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    contexts_table = table_name(catalog, schema, "silver_dim_mention_contexts")
+    documents_table = table_name(catalog, schema, "silver_dim_documents")
+    temp_view = "tmp_normalized_context_stance_ai_query"
 
     instructions = sql_string_literal(STANCE_INSTRUCTIONS)
     model_name = sql_string_literal(model)
     limit_clause = f"LIMIT {limit}" if limit is not None else ""
 
-    spark.sql(
+    normalized = spark.sql(
         f"""
-        CREATE OR REPLACE TABLE {output_table} AS
         WITH source_contexts AS (
             SELECT
-                mention_id,
-                document_id,
-                figure_id,
-                canonical_name,
-                matched_variant,
-                variant_type,
-                match_confidence,
-                match_method,
-                publication_year,
-                publication_month,
-                publication_day,
-                publication_date,
-                date_precision,
-                date_calendar,
-                date_extractor_name,
-                date_source_field,
-                date_confidence,
-                conflicts_with_metadata_year,
-                title,
-                ocr_quality_flag,
-                context_word_count,
-                context_window,
+                m.mention_id,
+                m.document_id,
+                m.figure_id,
+                m.variant_id,
+                m.date_key,
+                m.canonical_name,
+                m.matched_variant,
+                m.variant_normalized,
+                m.variant_type,
+                m.match_confidence,
+                m.match_method,
+                m.match_start_char,
+                m.match_end_char,
+                m.publication_year,
+                m.publication_month,
+                m.publication_day,
+                m.publication_date,
+                m.date_precision,
+                m.date_calendar,
+                m.ocr_quality_flag,
+                m.included_in_analysis_flag,
+                m.is_analysis_ready AS mention_is_analysis_ready,
+                d.title,
+                c.context_word_count,
+                c.context_window,
+                c.context_start_char,
+                c.context_end_char,
                 concat(
                     {instructions},
-                    '\\n\\nTarget figure: ', coalesce(canonical_name, ''),
-                    '\\nMatched variant: ', coalesce(matched_variant, ''),
-                    '\\nPublication year: ', coalesce(cast(publication_year AS string), ''),
-                    '\\nPublication month: ', coalesce(cast(publication_month AS string), ''),
-                    '\\nDocument title: ', coalesce(title, ''),
-                    '\\n\\nContext window:\\n', coalesce(context_window, '')
+                    '\\n\\nTarget figure: ', coalesce(m.canonical_name, ''),
+                    '\\nMatched variant: ', coalesce(m.matched_variant, ''),
+                    '\\nPublication year: ', coalesce(cast(m.publication_year AS string), ''),
+                    '\\nPublication month: ', coalesce(cast(m.publication_month AS string), ''),
+                    '\\nDocument title: ', coalesce(d.title, ''),
+                    '\\n\\nContext window:\\n', coalesce(c.context_window, '')
                 ) AS prompt
-            FROM {context_windows_table}
-            WHERE context_window IS NOT NULL
-              AND context_window != ''
-            ORDER BY mention_id
+            FROM {mentions_table} m
+            JOIN {contexts_table} c
+              ON m.mention_id = c.mention_id
+            LEFT JOIN {documents_table} d
+              ON m.document_id = d.document_id
+            WHERE c.context_window IS NOT NULL
+              AND c.context_window != ''
+            ORDER BY m.mention_id
             {limit_clause}
         ),
 
@@ -244,6 +254,22 @@ def build_context_stance_ai_query(
                 END AS target_relevance
 
             FROM normalized
+        ),
+
+        scored AS (
+            SELECT
+                *,
+                CASE
+                    WHEN stance_label = 'negative' AND stance_intensity = 'strong' THEN -1.0
+                    WHEN stance_label = 'negative' AND stance_intensity = 'moderate' THEN -0.66
+                    WHEN stance_label = 'negative' AND stance_intensity = 'weak' THEN -0.33
+                    WHEN stance_label = 'positive' AND stance_intensity = 'weak' THEN 0.33
+                    WHEN stance_label = 'positive' AND stance_intensity = 'moderate' THEN 0.66
+                    WHEN stance_label = 'positive' AND stance_intensity = 'strong' THEN 1.0
+                    ELSE 0.0
+                END AS stance_score,
+                'deterministic_label_intensity_mapping' AS stance_score_method
+            FROM validated
         )
 
         SELECT
@@ -255,16 +281,33 @@ def build_context_stance_ai_query(
                     {model_name}
                 ),
                 256
-            ) AS stance_candidate_id,
+            ) AS stance_audit_id,
+
+            sha2(
+                concat_ws(
+                    '|',
+                    stance_label,
+                    stance_intensity,
+                    stance_confidence,
+                    target_relevance,
+                    stance_score_method
+                ),
+                256
+            ) AS stance_category_id,
 
             mention_id,
             document_id,
             figure_id,
+            variant_id,
+            date_key,
             canonical_name,
             matched_variant,
+            variant_normalized,
             variant_type,
             match_confidence,
             match_method,
+            match_start_char,
+            match_end_char,
 
             publication_year,
             publication_month,
@@ -272,37 +315,25 @@ def build_context_stance_ai_query(
             publication_date,
             date_precision,
             date_calendar,
-            date_extractor_name,
-            date_source_field,
-            date_confidence,
-            conflicts_with_metadata_year,
 
             title,
             ocr_quality_flag,
+            included_in_analysis_flag,
+            mention_is_analysis_ready,
             context_word_count,
             context_window,
+            context_start_char,
+            context_end_char,
 
             'databricks_ai_query' AS stance_method,
             {model_name} AS stance_model,
-
             stance_label,
             stance_intensity,
-
-            CASE
-                WHEN stance_label = 'negative' AND stance_intensity = 'strong' THEN -1.0
-                WHEN stance_label = 'negative' AND stance_intensity = 'moderate' THEN -0.66
-                WHEN stance_label = 'negative' AND stance_intensity = 'weak' THEN -0.33
-                WHEN stance_label = 'positive' AND stance_intensity = 'weak' THEN 0.33
-                WHEN stance_label = 'positive' AND stance_intensity = 'moderate' THEN 0.66
-                WHEN stance_label = 'positive' AND stance_intensity = 'strong' THEN 1.0
-                ELSE 0.0
-            END AS stance_score,
-
-            'deterministic_label_intensity_mapping' AS stance_score_method,
-            model_stance_score_raw,
-
             stance_confidence,
             target_relevance,
+            stance_score,
+            stance_score_method,
+            model_stance_score_raw,
 
             evidence_text,
             evidence_translation_en,
@@ -311,13 +342,152 @@ def build_context_stance_ai_query(
             cleaned_raw_response,
             prompt,
             current_timestamp() AS stance_scored_at
-
-        FROM validated
+        FROM scored
         """
     )
 
-    row_count = spark.table(output_table).count()
-    print(f"Wrote {row_count} rows to {output_table}")
+    normalized.createOrReplaceTempView(temp_view)
+    return normalized
+
+
+def write_dim_stance_categories(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> None:
+    """Write stance category dimension from normalized stance results."""
+    temp_view = "tmp_normalized_context_stance_ai_query"
+    output_table = table_name(catalog, schema, "silver_dim_stance_categories")
+
+    spark.sql(
+        f"""
+        CREATE OR REPLACE TABLE {output_table} AS
+        SELECT DISTINCT
+            stance_category_id,
+            stance_label,
+            stance_intensity,
+            stance_confidence,
+            target_relevance,
+            stance_score_method,
+            stance_score,
+            current_timestamp() AS created_at
+        FROM {temp_view}
+        """
+    )
+
+    print(f"Wrote {spark.table(output_table).count()} rows to {output_table}")
+
+
+def write_stance_model_audit(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> None:
+    """Write stance model audit table."""
+    temp_view = "tmp_normalized_context_stance_ai_query"
+    output_table = table_name(catalog, schema, "silver_stance_model_audit")
+
+    spark.sql(
+        f"""
+        CREATE OR REPLACE TABLE {output_table} AS
+        SELECT
+            stance_audit_id,
+            mention_id,
+            document_id,
+            figure_id,
+            variant_id,
+            stance_category_id,
+            stance_method,
+            stance_model,
+            stance_score_method,
+            model_stance_score_raw,
+            evidence_text,
+            evidence_translation_en,
+            explanation,
+            raw_response,
+            cleaned_raw_response,
+            prompt,
+            stance_scored_at
+        FROM {temp_view}
+        """
+    )
+
+    print(f"Wrote {spark.table(output_table).count()} rows to {output_table}")
+
+
+def update_fact_figure_mentions(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> None:
+    """Overwrite figure mention fact table with selected stance fields added."""
+    temp_view = "tmp_normalized_context_stance_ai_query"
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+
+    spark.sql(
+        f"""
+        CREATE OR REPLACE TABLE {mentions_table} AS
+        SELECT
+            m.mention_id,
+            m.document_id,
+            m.figure_id,
+            m.variant_id,
+            m.date_key,
+            m.canonical_name,
+            m.matched_variant,
+            m.variant_normalized,
+            m.variant_type,
+            m.match_confidence,
+            m.is_high_confidence_match,
+            m.match_method,
+            m.match_start_char,
+            m.match_end_char,
+            m.publication_year,
+            m.publication_month,
+            m.publication_day,
+            m.publication_date,
+            m.date_precision,
+            m.date_calendar,
+            m.ocr_quality_flag,
+            m.included_in_analysis_flag,
+
+            s.stance_category_id,
+            s.stance_audit_id,
+            s.stance_score,
+
+            CASE
+                WHEN s.mention_id IS NOT NULL THEN true
+                ELSE false
+            END AS is_stance_scored,
+
+            CASE
+                WHEN s.stance_confidence IN ('medium', 'high') THEN true
+                ELSE false
+            END AS is_medium_or_high_stance_confidence,
+
+            CASE
+                WHEN s.target_relevance IN ('direct', 'indirect') THEN true
+                ELSE false
+            END AS is_direct_or_indirect_relevance,
+
+            CASE
+                WHEN m.is_analysis_ready
+                     AND s.mention_id IS NOT NULL
+                     AND s.stance_confidence IN ('medium', 'high')
+                THEN true
+                ELSE false
+            END AS is_analysis_ready,
+
+            m.extracted_at,
+            current_timestamp() AS stance_updated_at
+
+        FROM {mentions_table} m
+        LEFT JOIN {temp_view} s
+          ON m.mention_id = s.mention_id
+        """
+    )
+
+    print(f"Updated {spark.table(mentions_table).count()} rows in {mentions_table}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -331,7 +501,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run Databricks AI stance classification."""
+    """Run Databricks AI stance classification into dimensional silver model."""
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
 
@@ -341,6 +511,24 @@ def main() -> None:
         schema=args.schema,
         model=args.model,
         limit=args.limit,
+    )
+
+    write_dim_stance_categories(
+        spark=spark,
+        catalog=args.catalog,
+        schema=args.schema,
+    )
+
+    write_stance_model_audit(
+        spark=spark,
+        catalog=args.catalog,
+        schema=args.schema,
+    )
+
+    update_fact_figure_mentions(
+        spark=spark,
+        catalog=args.catalog,
+        schema=args.schema,
     )
 
 

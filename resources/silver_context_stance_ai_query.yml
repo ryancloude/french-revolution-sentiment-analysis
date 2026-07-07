@@ -1,10 +1,10 @@
 resources:
   jobs:
-    silver_context_stance_ai_query:
-      name: ${bundle.target}-frc-silver-context-stance-ai-query
+    silver_figure_mention_stance:
+      name: ${bundle.target}-frc-silver-figure-mention-stance
 
       tasks:
-        - task_key: score_context_stance_ai_query
+        - task_key: score_figure_mention_stance
           spark_python_task:
             python_file: ../src/frc_sentiment/transform/score_context_stance_ai_query.py
             parameters:
