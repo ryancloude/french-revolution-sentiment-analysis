@@ -1,4 +1,4 @@
-"""Build date candidates using Databricks ai_extract."""
+"""Append AI-extracted publication date candidates to the unified silver candidate table."""
 
 from __future__ import annotations
 
@@ -90,16 +90,16 @@ def build_ai_extract_date_candidates(
     catalog: str,
     schema: str,
 ) -> None:
-    """Create AI-extracted publication date candidates."""
-    documents_table = table_name(catalog, schema, "silver_documents")
-    output_table = table_name(catalog, schema, "silver_date_candidates_ai_extract")
+    """Append AI-extracted publication date candidates to the unified candidate table."""
+    documents_table = table_name(catalog, schema, "silver_dim_documents")
+    candidates_table = table_name(catalog, schema, "silver_publication_date_candidates")
 
     ai_extract_schema = sql_string_literal(AI_EXTRACT_SCHEMA)
     ai_extract_instructions = sql_string_literal(AI_EXTRACT_INSTRUCTIONS)
 
     spark.sql(
         f"""
-        CREATE OR REPLACE TABLE {output_table} AS
+        CREATE OR REPLACE TEMP VIEW tmp_ai_publication_date_candidates AS
         WITH source_documents AS (
             SELECT
                 document_id,
@@ -238,16 +238,15 @@ def build_ai_extract_date_candidates(
             ) AS date_candidate_id,
 
             document_id,
-            title,
-            publication_date_raw,
 
             'databricks_ai_extract' AS extractor_name,
-            'combined_metadata_title_ocr_front_matter' AS source_field,
+            '2.1' AS extractor_version,
+            'combined_metadata_title_ocr_front_matter' AS candidate_source_field,
 
-            publication_year,
-            publication_month,
-            publication_day,
-            publication_date,
+            publication_year AS candidate_publication_year,
+            publication_month AS candidate_publication_month,
+            publication_day AS candidate_publication_day,
+            publication_date AS candidate_publication_date,
 
             CASE
                 WHEN date_precision_raw IN ('day', 'month', 'year') THEN date_precision_raw
@@ -255,26 +254,27 @@ def build_ai_extract_date_candidates(
                 WHEN publication_month IS NOT NULL AND publication_year IS NOT NULL THEN 'month'
                 WHEN publication_year IS NOT NULL THEN 'year'
                 ELSE 'unknown'
-            END AS date_precision,
+            END AS candidate_date_precision,
 
             CASE
                 WHEN calendar_raw LIKE '%republic%' THEN 'french_republican'
                 WHEN calendar_raw LIKE '%gregorian%' THEN 'gregorian'
                 ELSE 'unknown'
-            END AS date_calendar,
+            END AS candidate_date_calendar,
 
             CASE
                 WHEN confidence_raw IN ('high', 'medium', 'low') THEN confidence_raw
                 WHEN confidence_score >= 0.85 THEN 'high'
                 WHEN confidence_score >= 0.65 THEN 'medium'
                 ELSE 'low'
-            END AS confidence,
+            END AS candidate_confidence,
 
-            confidence_score,
-            evidence,
+            confidence_score AS candidate_confidence_score,
+            evidence AS candidate_evidence,
             to_json(extracted) AS raw_extraction,
             substr(extraction_input, 1, 2500) AS source_text_excerpt,
-            current_timestamp() AS candidate_created_at
+            CAST(false AS boolean) AS selected_for_document,
+            current_timestamp() AS created_at
 
         FROM normalized
         WHERE
@@ -286,8 +286,68 @@ def build_ai_extract_date_candidates(
         """
     )
 
-    row_count = spark.table(output_table).count()
-    print(f"Wrote {row_count} rows to {output_table}")
+    spark.sql(
+        f"""
+        CREATE OR REPLACE TABLE {candidates_table} AS
+        SELECT
+            date_candidate_id,
+            document_id,
+            extractor_name,
+            extractor_version,
+            candidate_source_field,
+            candidate_publication_year,
+            candidate_publication_month,
+            candidate_publication_day,
+            candidate_publication_date,
+            candidate_date_precision,
+            candidate_date_calendar,
+            candidate_confidence,
+            CAST(NULL AS double) AS candidate_confidence_score,
+            candidate_notes AS candidate_evidence,
+            CAST(NULL AS string) AS raw_extraction,
+            substr(
+                concat(
+                    'Metadata date: ', coalesce(publication_date_raw, ''), '\\n',
+                    'Title: ', coalesce(title, ''), '\\n',
+                    'OCR front matter: ', coalesce(substr(ocr_front_matter, 1, 2000), '')
+                ),
+                1,
+                2500
+            ) AS source_text_excerpt,
+            selected_for_document,
+            created_at
+        FROM {candidates_table}
+        WHERE extractor_name != 'databricks_ai_extract'
+
+        UNION ALL
+
+        SELECT
+            date_candidate_id,
+            document_id,
+            extractor_name,
+            extractor_version,
+            candidate_source_field,
+            candidate_publication_year,
+            candidate_publication_month,
+            candidate_publication_day,
+            candidate_publication_date,
+            candidate_date_precision,
+            candidate_date_calendar,
+            candidate_confidence,
+            candidate_confidence_score,
+            candidate_evidence,
+            raw_extraction,
+            source_text_excerpt,
+            selected_for_document,
+            created_at
+        FROM tmp_ai_publication_date_candidates
+        """
+    )
+
+    ai_row_count = spark.table(candidates_table).where(
+        "extractor_name = 'databricks_ai_extract'"
+    ).count()
+    print(f"Wrote {ai_row_count} AI date candidate rows to {candidates_table}")
 
 
 def parse_args() -> argparse.Namespace:

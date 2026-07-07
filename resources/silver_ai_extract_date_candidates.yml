@@ -1,10 +1,10 @@
 resources:
   jobs:
-    silver_ai_extract_date_candidates:
-      name: ${bundle.target}-frc-silver-ai-extract-date-candidates
+    silver_ai_publication_date_candidates:
+      name: ${bundle.target}-frc-silver-ai-publication-date-candidates
 
       tasks:
-        - task_key: build_ai_extract_date_candidates
+        - task_key: build_ai_publication_date_candidates
           spark_python_task:
             python_file: ../src/frc_sentiment/transform/build_ai_extract_date_candidates.py
             parameters:

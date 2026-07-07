@@ -1,7 +1,7 @@
 resources:
   jobs:
-    silver_selected_publication_dates:
-      name: ${bundle.target}-frc-silver-selected-publication-dates
+    silver_select_publication_dates:
+      name: ${bundle.target}-frc-silver-select-publication-dates
 
       tasks:
         - task_key: select_publication_dates
