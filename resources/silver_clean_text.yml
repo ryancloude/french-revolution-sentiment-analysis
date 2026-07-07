@@ -1,10 +1,10 @@
 resources:
   jobs:
-    silver_clean_text:
-      name: ${bundle.target}-frc-silver-clean-text
+    silver_document_text_model:
+      name: ${bundle.target}-frc-silver-document-text-model
 
       tasks:
-        - task_key: clean_ocr_text
+        - task_key: build_document_text_model
           spark_python_task:
             python_file: ../src/frc_sentiment/transform/clean_text.py
             parameters:

@@ -1,4 +1,4 @@
-"""Clean OCR text from bronze into the silver clean text table."""
+"""Clean OCR text into dimensional document text and document fact tables."""
 
 from __future__ import annotations
 
@@ -30,27 +30,24 @@ def table_name(catalog: str, schema: str, table: str) -> str:
     )
 
 
-def build_silver_clean_text(
+def build_clean_document_text(
     spark: SparkSession,
     catalog: str,
     schema: str,
 ) -> DataFrame:
-    """Build cleaned OCR text with basic text quality flags."""
+    """Build cleaned OCR text with reusable document text fields."""
     bronze_ocr_text_table = table_name(catalog, schema, "bronze_ocr_text")
-    silver_documents_table = table_name(catalog, schema, "silver_documents")
+    documents_table = table_name(catalog, schema, "silver_dim_documents")
 
     ocr_text = spark.table(bronze_ocr_text_table)
 
-    documents = spark.table(silver_documents_table).select(
+    documents = spark.table(documents_table).select(
         "document_id",
-        "title",
-        "publication_year",
-        "publication_date_raw",
-        "language",
+        "date_key",
         "metadata_parse_status",
     )
 
-    cleaned = (
+    return (
         ocr_text.join(documents, on="document_id", how="left")
         .withColumn("raw_text", F.coalesce(F.col("raw_text"), F.lit("")))
         .withColumn("character_count", F.length(F.col("raw_text")))
@@ -65,7 +62,7 @@ def build_silver_clean_text(
         )
         .withColumn(
             "contains_encoding_artifacts",
-            F.col("raw_text").rlike(r"Ã|Â|â€|�"),
+            F.col("raw_text").rlike(r"Ãƒ|Ã‚|Ã¢â‚¬|ï¿½"),
         )
         .withColumn(
             "ocr_quality_flag",
@@ -75,44 +72,96 @@ def build_silver_clean_text(
             .otherwise(F.lit("usable")),
         )
         .withColumn("cleaned_at", F.current_timestamp())
+    )
+
+
+def build_silver_dim_document_text(clean_document_text: DataFrame) -> DataFrame:
+    """Build document text dimension with large raw and cleaned text fields."""
+    return clean_document_text.select(
+        "document_id",
+        "raw_text",
+        "clean_text",
+        "clean_text_lower",
+        "file_path",
+        "source_file_type",
+        "ingested_at",
+        "cleaned_at",
+    )
+
+
+def build_updated_silver_fact_documents(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+    clean_document_text: DataFrame,
+) -> DataFrame:
+    """Update document fact table with text quality measures."""
+    fact_documents_table = table_name(catalog, schema, "silver_fact_documents")
+
+    existing_facts = spark.table(fact_documents_table)
+
+    text_facts = clean_document_text.select(
+        "document_id",
+        "word_count",
+        "character_count",
+        "clean_character_count",
+        "contains_encoding_artifacts",
+        "ocr_quality_flag",
+    )
+
+    return (
+        existing_facts.join(text_facts, on="document_id", how="left")
+        .withColumn("word_count", F.coalesce(F.col("word_count"), F.lit(0)))
+        .withColumn("character_count", F.coalesce(F.col("character_count"), F.lit(0)))
+        .withColumn(
+            "clean_character_count",
+            F.coalesce(F.col("clean_character_count"), F.lit(0)),
+        )
+        .withColumn(
+            "contains_encoding_artifacts",
+            F.coalesce(F.col("contains_encoding_artifacts"), F.lit(False)),
+        )
+        .withColumn(
+            "ocr_quality_flag",
+            F.coalesce(F.col("ocr_quality_flag"), F.lit("missing_ocr_text")),
+        )
+        .withColumn(
+            "included_in_analysis_flag",
+            F.col("has_valid_publication_year")
+            & F.col("has_ocr_text")
+            & (F.col("ocr_quality_flag") != F.lit("empty_text")),
+        )
+        .withColumn("updated_at", F.current_timestamp())
         .select(
             "document_id",
-            "title",
-            "publication_year",
-            "publication_date_raw",
-            "language",
-            "raw_text",
-            "clean_text",
-            "clean_text_lower",
+            "date_key",
+            "has_ocr_text",
+            "has_valid_publication_year",
+            "has_publication_month",
+            "has_publication_day",
+            "metadata_parse_success_flag",
             "word_count",
             "character_count",
             "clean_character_count",
             "contains_encoding_artifacts",
             "ocr_quality_flag",
-            "metadata_parse_status",
-            "file_path",
-            "source_file_type",
-            "ingested_at",
-            "cleaned_at",
+            "included_in_analysis_flag",
+            "created_at",
+            "updated_at",
         )
     )
 
-    return cleaned
 
-
-def build_text_quality_summary(clean_text: DataFrame) -> DataFrame:
-    """Build a compact quality summary table for the cleaned OCR text."""
+def build_text_quality_summary(clean_document_text: DataFrame) -> DataFrame:
+    """Build a compact quality summary table for cleaned OCR text."""
     return (
-        clean_text.groupBy("ocr_quality_flag")
+        clean_document_text.groupBy("ocr_quality_flag")
         .agg(
             F.count("*").alias("document_count"),
             F.min("word_count").alias("min_word_count"),
             F.expr("percentile_approx(word_count, 0.5)").alias("median_word_count"),
             F.avg("word_count").alias("avg_word_count"),
             F.max("word_count").alias("max_word_count"),
-            F.sum(F.when(F.col("publication_year").isNull(), 1).otherwise(0)).alias(
-                "documents_missing_year"
-            ),
             F.sum(F.when(F.col("contains_encoding_artifacts"), 1).otherwise(0)).alias(
                 "documents_with_encoding_artifacts"
             ),
@@ -148,21 +197,35 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Create silver clean text and text quality summary tables."""
+    """Create dimensional document text and update document facts."""
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
 
-    clean_text = build_silver_clean_text(
+    clean_document_text = build_clean_document_text(
         spark=spark,
         catalog=args.catalog,
         schema=args.schema,
     )
 
-    quality_summary = build_text_quality_summary(clean_text)
+    document_text = build_silver_dim_document_text(clean_document_text)
+
+    updated_fact_documents = build_updated_silver_fact_documents(
+        spark=spark,
+        catalog=args.catalog,
+        schema=args.schema,
+        clean_document_text=clean_document_text,
+    )
+
+    quality_summary = build_text_quality_summary(clean_document_text)
 
     write_delta_table(
-        clean_text,
-        table_name(args.catalog, args.schema, "silver_clean_text"),
+        document_text,
+        table_name(args.catalog, args.schema, "silver_dim_document_text"),
+    )
+
+    write_delta_table(
+        updated_fact_documents,
+        table_name(args.catalog, args.schema, "silver_fact_documents"),
     )
 
     write_delta_table(
