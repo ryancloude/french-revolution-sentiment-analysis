@@ -1,4 +1,4 @@
-"""Load the manually maintained figure lookup CSV into a silver Delta table."""
+"""Load the figure lookup CSV into dimensional silver figure tables."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ FIGURE_COLUMNS = [
     "notes",
 ]
 
-FIGURE_SCHEMA = T.StructType(
+FIGURE_LOOKUP_SCHEMA = T.StructType(
     [
         T.StructField("figure_id", T.StringType(), True),
         T.StructField("canonical_name", T.StringType(), True),
@@ -158,12 +158,24 @@ def normalize_variant(column: F.Column) -> F.Column:
     return F.trim(F.regexp_replace(F.lower(column), r"\s+", " "))
 
 
-def load_figures(spark: SparkSession, figures_path: Path) -> DataFrame:
+def variant_id_column(figure_id: F.Column, variant_normalized: F.Column) -> F.Column:
+    """Build a stable figure variant identifier."""
+    return F.sha2(
+        F.concat_ws(
+            "|",
+            figure_id,
+            variant_normalized,
+        ),
+        256,
+    )
+
+
+def load_figure_lookup(spark: SparkSession, figures_path: Path) -> DataFrame:
     """Read and validate the figure lookup CSV."""
     rows = read_figure_rows(figures_path)
 
     figures = (
-        spark.createDataFrame(rows, schema=FIGURE_SCHEMA)
+        spark.createDataFrame(rows, schema=FIGURE_LOOKUP_SCHEMA)
         .withColumn(
             "variant_normalized",
             F.when(
@@ -191,17 +203,72 @@ def load_figures(spark: SparkSession, figures_path: Path) -> DataFrame:
         invalid_rows.show(truncate=False)
         raise RuntimeError(f"Found {invalid_count} invalid figure lookup rows")
 
-    duplicate_count = (
+    duplicate_variant_count = (
         figures.groupBy("figure_id", "variant_normalized")
         .count()
         .where(F.col("count") > 1)
         .count()
     )
 
-    if duplicate_count > 0:
+    if duplicate_variant_count > 0:
         raise RuntimeError("Found duplicate figure_id + variant_normalized rows")
 
+    conflicting_figure_names = (
+        figures.groupBy("figure_id")
+        .agg(F.countDistinct("canonical_name").alias("canonical_name_count"))
+        .where(F.col("canonical_name_count") > 1)
+        .count()
+    )
+
+    if conflicting_figure_names > 0:
+        raise RuntimeError("Found figure_id values with multiple canonical names")
+
     return figures
+
+
+def build_silver_dim_figures(figure_lookup: DataFrame) -> DataFrame:
+    """Build one row per tracked historical figure."""
+    return (
+        figure_lookup.groupBy("figure_id", "canonical_name")
+        .agg(
+            F.min("loaded_at").alias("loaded_at"),
+            F.count("*").alias("variant_count"),
+            F.sum(F.when(F.col("match_confidence") == "high", 1).otherwise(0)).alias(
+                "high_confidence_variant_count"
+            ),
+            F.sum(F.when(F.col("match_confidence") == "medium", 1).otherwise(0)).alias(
+                "medium_confidence_variant_count"
+            ),
+            F.sum(F.when(F.col("match_confidence") == "low", 1).otherwise(0)).alias(
+                "low_confidence_variant_count"
+            ),
+        )
+        .orderBy("canonical_name")
+    )
+
+
+def build_silver_dim_figure_variants(figure_lookup: DataFrame) -> DataFrame:
+    """Build one row per tracked figure name variant."""
+    return (
+        figure_lookup.withColumn(
+            "variant_id",
+            variant_id_column(
+                F.col("figure_id"),
+                F.col("variant_normalized"),
+            ),
+        )
+        .select(
+            "variant_id",
+            "figure_id",
+            "variant",
+            "variant_normalized",
+            "variant_type",
+            "match_confidence",
+            "notes",
+            "loaded_at",
+        )
+        .orderBy("figure_id", "variant_normalized")
+    )
 
 
 def write_delta_table(df: DataFrame, full_table_name: str) -> None:
@@ -231,18 +298,23 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Load the figure lookup CSV into the silver layer."""
+    """Load the figure lookup CSV into dimensional silver figure tables."""
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
 
     figures_path = resolve_lookup_path(args.figures_path)
     print(f"Reading figure lookup from: {figures_path}")
 
-    figures = load_figures(spark, figures_path)
+    figure_lookup = load_figure_lookup(spark, figures_path)
 
     write_delta_table(
-        figures,
-        table_name(args.catalog, args.schema, "silver_figures"),
+        build_silver_dim_figures(figure_lookup),
+        table_name(args.catalog, args.schema, "silver_dim_figures"),
+    )
+
+    write_delta_table(
+        build_silver_dim_figure_variants(figure_lookup),
+        table_name(args.catalog, args.schema, "silver_dim_figure_variants"),
     )
 
 

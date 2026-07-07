@@ -1,10 +1,10 @@
 resources:
   jobs:
-    silver_figures:
-      name: ${bundle.target}-frc-silver-figures
+    silver_figure_model:
+      name: ${bundle.target}-frc-silver-figure-model
 
       tasks:
-        - task_key: load_figure_lookup
+        - task_key: build_figure_model
           spark_python_task:
             python_file: ../src/frc_sentiment/transform/load_figures.py
             parameters:
