@@ -1,0 +1,20 @@
+resources:
+  jobs:
+    gold_top_stance_contexts:
+      name: ${bundle.target}-frc-gold-top-stance-contexts
+
+      tasks:
+        - task_key: build_top_stance_contexts
+          spark_python_task:
+            python_file: ../src/frc_sentiment/gold/build_top_stance_contexts.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --schema
+              - ${var.schema}
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
