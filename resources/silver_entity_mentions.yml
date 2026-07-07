@@ -1,10 +1,10 @@
 resources:
   jobs:
-    silver_entity_mentions:
-      name: ${bundle.target}-frc-silver-entity-mentions
+    silver_figure_mentions:
+      name: ${bundle.target}-frc-silver-figure-mentions
 
       tasks:
-        - task_key: extract_entity_mentions
+        - task_key: build_fact_figure_mentions
           spark_python_task:
             python_file: ../src/frc_sentiment/transform/extract_entities.py
             parameters:

@@ -1,4 +1,4 @@
-"""Extract figure mentions from cleaned OCR text using dictionary matching."""
+"""Extract figure mentions into the silver figure mention fact table."""
 
 from __future__ import annotations
 
@@ -15,11 +15,9 @@ MENTION_SCHEMA = T.ArrayType(
     T.StructType(
         [
             T.StructField("figure_id", T.StringType(), False),
-            T.StructField("canonical_name", T.StringType(), False),
+            T.StructField("variant_id", T.StringType(), False),
             T.StructField("matched_variant", T.StringType(), False),
             T.StructField("variant_normalized", T.StringType(), False),
-            T.StructField("variant_type", T.StringType(), True),
-            T.StructField("match_confidence", T.StringType(), True),
             T.StructField("match_start_char", T.IntegerType(), False),
             T.StructField("match_end_char", T.IntegerType(), False),
             T.StructField("match_method", T.StringType(), False),
@@ -77,8 +75,8 @@ def extract_mentions_from_text(
 
     mentions = []
 
-    for figure in figure_variants:
-        variant_normalized = figure["variant_normalized"]
+    for variant in figure_variants:
+        variant_normalized = variant["variant_normalized"]
         if not variant_normalized:
             continue
 
@@ -87,12 +85,10 @@ def extract_mentions_from_text(
         for match in pattern.finditer(clean_text_lower):
             mentions.append(
                 {
-                    "figure_id": figure["figure_id"],
-                    "canonical_name": figure["canonical_name"],
-                    "matched_variant": figure["variant"],
+                    "figure_id": variant["figure_id"],
+                    "variant_id": variant["variant_id"],
+                    "matched_variant": variant["variant"],
                     "variant_normalized": variant_normalized,
-                    "variant_type": figure["variant_type"],
-                    "match_confidence": figure["match_confidence"],
                     "match_start_char": match.start(),
                     "match_end_char": match.end(),
                     "match_method": "dictionary_regex",
@@ -104,6 +100,7 @@ def extract_mentions_from_text(
             int(mention["match_start_char"]),
             int(mention["match_end_char"]),
             str(mention["figure_id"]),
+            str(mention["variant_id"]),
         )
     )
 
@@ -115,18 +112,16 @@ def get_figure_variants(
     catalog: str,
     schema: str,
 ) -> list[dict[str, str | None]]:
-    """Collect the figure lookup table to the driver."""
-    figures_table = table_name(catalog, schema, "silver_figures")
+    """Collect figure variants to the driver for dictionary matching."""
+    figure_variants_table = table_name(catalog, schema, "silver_dim_figure_variants")
 
     rows = (
-        spark.table(figures_table)
+        spark.table(figure_variants_table)
         .select(
+            "variant_id",
             "figure_id",
-            "canonical_name",
             "variant",
             "variant_normalized",
-            "variant_type",
-            "match_confidence",
         )
         .where(F.col("variant_normalized").isNotNull())
         .collect()
@@ -135,67 +130,84 @@ def get_figure_variants(
     return [row.asDict(recursive=True) for row in rows]
 
 
-def build_entity_mentions(
+def build_fact_figure_mentions(
     spark: SparkSession,
     catalog: str,
     schema: str,
 ) -> DataFrame:
-    """Build the silver entity mentions table."""
-    clean_text_table = table_name(catalog, schema, "silver_clean_text")
-    selected_dates_table = table_name(catalog, schema, "silver_selected_publication_dates")
+    """Build one row per detected figure mention."""
+    document_text_table = table_name(catalog, schema, "silver_dim_document_text")
+    documents_table = table_name(catalog, schema, "silver_dim_documents")
+    dates_table = table_name(catalog, schema, "silver_dim_dates")
+    figures_table = table_name(catalog, schema, "silver_dim_figures")
+    variants_table = table_name(catalog, schema, "silver_dim_figure_variants")
+    fact_documents_table = table_name(catalog, schema, "silver_fact_documents")
 
     figure_variants = get_figure_variants(spark, catalog, schema)
 
     if not figure_variants:
-        raise RuntimeError("No figure variants found in silver_figures")
+        raise RuntimeError("No figure variants found in silver_dim_figure_variants")
 
     @F.udf(returnType=MENTION_SCHEMA)
     def extract_mentions_udf(clean_text_lower: str | None) -> list[dict[str, str | int | None]]:
         return extract_mentions_from_text(clean_text_lower, figure_variants)
 
-    selected_dates = spark.table(selected_dates_table).select(
+    document_text = spark.table(document_text_table).select(
         "document_id",
-        "selected_publication_year",
-        "selected_publication_month",
-        "selected_publication_day",
-        "selected_publication_date",
-        "selected_date_precision",
-        "selected_date_calendar",
-        "selected_extractor_name",
-        "selected_source_field",
-        "selected_confidence",
-        "selected_evidence",
-        "conflicts_with_metadata_year",
+        "clean_text_lower",
     )
 
-    documents = (
-        spark.table(clean_text_table)
-        .select(
-            "document_id",
-            "title",
-            "clean_text_lower",
-            "ocr_quality_flag",
-        )
-        .join(selected_dates, on="document_id", how="left")
+    documents = spark.table(documents_table).select(
+        "document_id",
+        "date_key",
+    )
+
+    dates = spark.table(dates_table).select(
+        "date_key",
+        "publication_year",
+        "publication_month",
+        "publication_day",
+        "publication_date",
+        "date_precision",
+        "date_calendar",
+    )
+
+    fact_documents = spark.table(fact_documents_table).select(
+        "document_id",
+        "ocr_quality_flag",
+        "included_in_analysis_flag",
+    )
+
+    figures = spark.table(figures_table).select(
+        "figure_id",
+        "canonical_name",
+    )
+
+    variants = spark.table(variants_table).select(
+        "variant_id",
+        "variant_type",
+        "match_confidence",
+    )
+
+    source_documents = (
+        document_text.join(documents, on="document_id", how="left")
+        .join(dates, on="date_key", how="left")
+        .join(fact_documents, on="document_id", how="left")
     )
 
     mentions = (
-        documents.withColumn("mentions", extract_mentions_udf(F.col("clean_text_lower")))
+        source_documents.withColumn("mentions", extract_mentions_udf(F.col("clean_text_lower")))
         .select(
             "document_id",
-            "selected_publication_year",
-            "selected_publication_month",
-            "selected_publication_day",
-            "selected_publication_date",
-            "selected_date_precision",
-            "selected_date_calendar",
-            "selected_extractor_name",
-            "selected_source_field",
-            "selected_confidence",
-            "selected_evidence",
-            "conflicts_with_metadata_year",
-            "title",
+            "date_key",
+            "publication_year",
+            "publication_month",
+            "publication_day",
+            "publication_date",
+            "date_precision",
+            "date_calendar",
             "ocr_quality_flag",
+            "included_in_analysis_flag",
             F.explode_outer("mentions").alias("mention"),
         )
         .where(F.col("mention").isNotNull())
@@ -205,40 +217,74 @@ def build_entity_mentions(
                     "|",
                     F.col("document_id"),
                     F.col("mention.figure_id"),
+                    F.col("mention.variant_id"),
                     F.col("mention.match_start_char").cast("string"),
                     F.col("mention.match_end_char").cast("string"),
-                    F.col("mention.variant_normalized"),
                 ),
                 256,
             ).alias("mention_id"),
             "document_id",
-            F.col("selected_publication_year").alias("publication_year"),
-            F.col("selected_publication_month").alias("publication_month"),
-            F.col("selected_publication_day").alias("publication_day"),
-            F.col("selected_publication_date").alias("publication_date"),
-            F.col("selected_date_precision").alias("date_precision"),
-            F.col("selected_date_calendar").alias("date_calendar"),
-            F.col("selected_extractor_name").alias("date_extractor_name"),
-            F.col("selected_source_field").alias("date_source_field"),
-            F.col("selected_confidence").alias("date_confidence"),
-            F.col("selected_evidence").alias("date_evidence"),
-            "conflicts_with_metadata_year",
-            "title",
+            "date_key",
+            "publication_year",
+            "publication_month",
+            "publication_day",
+            "publication_date",
+            "date_precision",
+            "date_calendar",
             "ocr_quality_flag",
+            "included_in_analysis_flag",
             F.col("mention.figure_id").alias("figure_id"),
-            F.col("mention.canonical_name").alias("canonical_name"),
+            F.col("mention.variant_id").alias("variant_id"),
             F.col("mention.matched_variant").alias("matched_variant"),
             F.col("mention.variant_normalized").alias("variant_normalized"),
-            F.col("mention.variant_type").alias("variant_type"),
-            F.col("mention.match_confidence").alias("match_confidence"),
             F.col("mention.match_start_char").alias("match_start_char"),
             F.col("mention.match_end_char").alias("match_end_char"),
             F.col("mention.match_method").alias("match_method"),
-            F.current_timestamp().alias("extracted_at"),
         )
     )
 
-    return mentions
+    return (
+        mentions.join(figures, on="figure_id", how="left")
+        .join(variants, on="variant_id", how="left")
+        .withColumn(
+            "is_high_confidence_match",
+            F.col("match_confidence") == F.lit("high"),
+        )
+        .withColumn(
+            "is_analysis_ready",
+            F.col("included_in_analysis_flag")
+            & F.col("publication_year").isNotNull()
+            & F.col("figure_id").isNotNull(),
+        )
+        .withColumn("extracted_at", F.current_timestamp())
+        .select(
+            "mention_id",
+            "document_id",
+            "figure_id",
+            "variant_id",
+            "date_key",
+            "canonical_name",
+            "matched_variant",
+            "variant_normalized",
+            "variant_type",
+            "match_confidence",
+            "is_high_confidence_match",
+            "match_method",
+            "match_start_char",
+            "match_end_char",
+            "publication_year",
+            "publication_month",
+            "publication_day",
+            "publication_date",
+            "date_precision",
+            "date_calendar",
+            "ocr_quality_flag",
+            "included_in_analysis_flag",
+            "is_analysis_ready",
+            "extracted_at",
+        )
+        .orderBy("document_id", "match_start_char", "figure_id", "variant_id")
+    )
 
 
 def write_delta_table(df: DataFrame, full_table_name: str) -> None:
@@ -264,11 +310,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Extract figure mentions into a silver table."""
+    """Extract figure mentions into a fact table."""
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
 
-    mentions = build_entity_mentions(
+    mentions = build_fact_figure_mentions(
         spark=spark,
         catalog=args.catalog,
         schema=args.schema,
@@ -276,7 +322,7 @@ def main() -> None:
 
     write_delta_table(
         mentions,
-        table_name(args.catalog, args.schema, "silver_entity_mentions"),
+        table_name(args.catalog, args.schema, "silver_fact_figure_mentions"),
     )
 
 
