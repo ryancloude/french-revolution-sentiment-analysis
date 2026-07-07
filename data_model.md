@@ -1,0 +1,24 @@
+Dimensions
+silver_dim_documents
+silver_dim_dates
+silver_dim_figures
+silver_dim_figure_variants
+silver_dim_creators
+silver_dim_subjects
+silver_dim_stance_categories
+silver_dim_mention_contexts
+
+Bridges
+silver_bridge_document_creators
+silver_bridge_document_subjects
+
+Facts
+silver_fact_documents
+silver_fact_figure_mentions
+
+Audit / candidate / quality
+silver_publication_date_candidates
+silver_stance_model_audit
+silver_data_quality_summary
+silver_figure_mention_summary
+silver_stance_distribution_summary
