@@ -1,12 +1,12 @@
 resources:
   jobs:
-    silver_ai_publication_date_candidates:
-      name: ${bundle.target}-frc-silver-ai-publication-date-candidates
+    silver_document_model:
+      name: ${bundle.target}-frc-silver-document-model
 
       tasks:
-        - task_key: build_ai_publication_date_candidates
+        - task_key: build_document_model
           spark_python_task:
-            python_file: ../src/frc_sentiment/transform/build_ai_extract_date_candidates.py
+            python_file: ../src/frc_sentiment/transform/build_document_model.py
             parameters:
               - --catalog
               - ${var.catalog}
@@ -18,3 +18,5 @@ resources:
         - environment_key: default
           spec:
             client: "4"
+            dependencies:
+              - convertdate==2.4.1

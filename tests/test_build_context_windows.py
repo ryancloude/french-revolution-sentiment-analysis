@@ -1,6 +1,6 @@
 """Tests for context window extraction."""
 
-from frc_sentiment.transform.build_context_windows import (
+from frc_sentiment.transform.build_mention_contexts import (
     build_context_for_mention,
     word_spans,
 )

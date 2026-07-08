@@ -2,7 +2,7 @@ bundle:
   name: french-revolution-sentiment-analysis
 
 include:
-  - resources/*.yml
+  - resources/**/*.yml
 
 variables:
   catalog:

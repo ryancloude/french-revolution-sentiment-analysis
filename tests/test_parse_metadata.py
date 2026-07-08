@@ -1,6 +1,6 @@
 """Tests for metadata XML parsing."""
 
-from frc_sentiment.transform.parse_metadata import parse_metadata_xml
+from frc_sentiment.transform.build_document_model import parse_metadata_xml
 
 
 def test_parse_metadata_xml_success() -> None:

@@ -1,12 +1,12 @@
 resources:
   jobs:
-    silver_document_model:
-      name: ${bundle.target}-frc-silver-document-model
+    silver_document_text_model:
+      name: ${bundle.target}-frc-silver-document-text-model
 
       tasks:
-        - task_key: build_document_model
+        - task_key: build_document_text_model
           spark_python_task:
-            python_file: ../src/frc_sentiment/transform/parse_metadata.py
+            python_file: ../src/frc_sentiment/transform/build_document_text_model.py
             parameters:
               - --catalog
               - ${var.catalog}
@@ -18,5 +18,3 @@ resources:
         - environment_key: default
           spec:
             client: "4"
-            dependencies:
-              - convertdate==2.4.1

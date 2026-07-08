@@ -1,12 +1,12 @@
 resources:
   jobs:
-    silver_document_text_model:
-      name: ${bundle.target}-frc-silver-document-text-model
+    silver_figure_mention_stance:
+      name: ${bundle.target}-frc-silver-figure-mention-stance
 
       tasks:
-        - task_key: build_document_text_model
+        - task_key: score_figure_mention_stance
           spark_python_task:
-            python_file: ../src/frc_sentiment/transform/clean_text.py
+            python_file: ../src/frc_sentiment/transform/build_figure_mention_stance.py
             parameters:
               - --catalog
               - ${var.catalog}

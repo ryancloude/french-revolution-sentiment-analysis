@@ -1,17 +1,19 @@
 resources:
   jobs:
-    silver_figure_mentions:
-      name: ${bundle.target}-frc-silver-figure-mentions
+    silver_figure_model:
+      name: ${bundle.target}-frc-silver-figure-model
 
       tasks:
-        - task_key: build_fact_figure_mentions
+        - task_key: build_figure_model
           spark_python_task:
-            python_file: ../src/frc_sentiment/transform/extract_entities.py
+            python_file: ../src/frc_sentiment/transform/build_figure_model.py
             parameters:
               - --catalog
               - ${var.catalog}
               - --schema
               - ${var.schema}
+              - --figures-path
+              - data/lookup/figures.csv
           environment_key: default
 
       environments:

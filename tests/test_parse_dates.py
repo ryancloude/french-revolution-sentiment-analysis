@@ -1,6 +1,6 @@
 """Tests for publication date extraction."""
 
-from frc_sentiment.transform.parse_metadata import parse_publication_date
+from frc_sentiment.transform.build_document_model import parse_publication_date
 
 
 def test_parse_year_only_from_metadata_date() -> None:
