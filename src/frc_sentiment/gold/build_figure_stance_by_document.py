@@ -43,25 +43,66 @@ def safe_ratio(numerator: str, denominator: str) -> Column:
     ).otherwise(F.lit(None).cast("double"))
 
 
-def add_period_label(df: DataFrame) -> DataFrame:
-    """Add a dashboard-friendly period label."""
-    return df.withColumn(
+def build_document_stance_rows(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> DataFrame:
+    """Join figure mention facts to document, date, and stance dimensions."""
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    documents_table = table_name(catalog, schema, "silver_dim_documents")
+    dates_table = table_name(catalog, schema, "silver_dim_dates")
+    stance_categories_table = table_name(catalog, schema, "silver_dim_stance_categories")
+
+    mentions = spark.table(mentions_table).drop(
+        "publication_year",
+        "publication_month",
+        "publication_day",
+        "publication_date",
+        "date_precision",
+        "date_calendar",
+    )
+
+    documents = spark.table(documents_table).select(
+        "document_id",
+        "title",
+        "creator",
+        "author",
+        "language",
+        "internet_archive_id",
+        "source_url",
+        "metadata_parse_status",
+        "conflicts_with_metadata_year",
+    )
+
+    dates = spark.table(dates_table).select(
+        "date_key",
         "period_label",
-        F.when(
-            F.col("publication_year").isNull(),
-            F.lit("Unknown"),
+        "publication_year",
+        "publication_month",
+        "publication_day",
+        "publication_date",
+        "date_precision",
+        "date_calendar",
+    )
+
+    stance_categories = spark.table(stance_categories_table).select(
+        "stance_category_id",
+        "stance_label",
+        "stance_intensity",
+        "stance_confidence",
+        "target_relevance",
+    )
+
+    return (
+        mentions.join(documents, on="document_id", how="left")
+        .join(dates, on="date_key", how="left")
+        .join(stance_categories, on="stance_category_id", how="left")
+        .withColumn(
+            "is_included",
+            (F.col("stance_confidence").isin("medium", "high"))
+            & F.col("stance_score").isNotNull(),
         )
-        .when(
-            F.col("publication_month").isNull(),
-            F.col("publication_year").cast("string"),
-        )
-        .otherwise(
-            F.concat_ws(
-                "-",
-                F.col("publication_year").cast("string"),
-                F.lpad(F.col("publication_month").cast("string"), 2, "0"),
-            )
-        ),
     )
 
 
@@ -70,33 +111,11 @@ def build_figure_stance_by_document(
     catalog: str,
     schema: str,
 ) -> DataFrame:
-    """Aggregate context-level stance scores into document-level figure stance."""
-    stance_table = table_name(catalog, schema, "silver_context_stance_ai_query")
-    documents_table = table_name(catalog, schema, "silver_documents")
-
-    stance_rows = (
-        spark.table(stance_table)
-        .withColumn(
-            "is_included",
-            (F.col("stance_confidence").isin("medium", "high"))
-            & F.col("stance_score").isNotNull(),
-        )
-        .transform(add_period_label)
-    )
-
-    documents = spark.table(documents_table).select(
-        "document_id",
-        F.col("title").alias("document_title"),
-        "creator",
-        "author",
-        "creators",
-        "metadata_authors",
-        "subjects",
-        "subjects_raw",
-        "language",
-        "internet_archive_id",
-        "source_url",
-        "metadata_parse_status",
+    """Aggregate mention-level stance into document-level figure stance."""
+    stance_rows = build_document_stance_rows(
+        spark=spark,
+        catalog=catalog,
+        schema=schema,
     )
 
     group_columns = [
@@ -105,99 +124,99 @@ def build_figure_stance_by_document(
         "canonical_name",
     ]
 
-    aggregated = stance_rows.groupBy(*group_columns).agg(
-        F.first("period_label", ignorenulls=True).alias("period_label"),
-        F.first("publication_year", ignorenulls=True).alias("publication_year"),
-        F.first("publication_month", ignorenulls=True).alias("publication_month"),
-        F.first("publication_day", ignorenulls=True).alias("publication_day"),
-        F.first("publication_date", ignorenulls=True).alias("publication_date"),
-        F.first("date_precision", ignorenulls=True).alias("date_precision"),
-        F.first("date_calendar", ignorenulls=True).alias("date_calendar"),
-        F.first("date_extractor_name", ignorenulls=True).alias("date_extractor_name"),
-        F.first("date_source_field", ignorenulls=True).alias("date_source_field"),
-        F.first("date_confidence", ignorenulls=True).alias("date_confidence"),
-        F.max(F.col("conflicts_with_metadata_year").cast("int")).alias(
-            "has_metadata_year_conflict_int"
-        ),
-        F.first("title", ignorenulls=True).alias("stance_title"),
-        F.first("ocr_quality_flag", ignorenulls=True).alias("ocr_quality_flag"),
-        F.count("*").alias("mention_count"),
-        count_when(F.col("is_included")).alias("included_mention_count"),
-        F.avg(F.when(F.col("is_included"), F.col("stance_score"))).alias(
-            "avg_stance_score"
-        ),
-        F.avg(F.when(F.col("is_included"), F.abs(F.col("stance_score")))).alias(
-            "avg_abs_stance_score"
-        ),
-        F.min(F.when(F.col("is_included"), F.col("stance_score"))).alias(
-            "min_stance_score"
-        ),
-        F.max(F.when(F.col("is_included"), F.col("stance_score"))).alias(
-            "max_stance_score"
-        ),
-        count_when(
-            F.col("is_included") & (F.col("stance_label") == F.lit("positive"))
-        ).alias("positive_mention_count"),
-        count_when(
-            F.col("is_included") & (F.col("stance_label") == F.lit("negative"))
-        ).alias("negative_mention_count"),
-        count_when(
-            F.col("is_included")
-            & (F.col("stance_label") == F.lit("neutral_or_unclear"))
-        ).alias("neutral_or_unclear_mention_count"),
-        count_when(
-            F.col("is_included") & (F.col("stance_intensity") == F.lit("weak"))
-        ).alias("weak_stance_mention_count"),
-        count_when(
-            F.col("is_included") & (F.col("stance_intensity") == F.lit("moderate"))
-        ).alias("moderate_stance_mention_count"),
-        count_when(
-            F.col("is_included") & (F.col("stance_intensity") == F.lit("strong"))
-        ).alias("strong_stance_mention_count"),
-        count_when(
-            F.col("is_included")
-            & (F.col("stance_label") == F.lit("negative"))
-            & (F.col("stance_intensity") == F.lit("strong"))
-        ).alias("strong_negative_mention_count"),
-        count_when(F.col("stance_confidence") == F.lit("high")).alias(
-            "high_confidence_count"
-        ),
-        count_when(F.col("stance_confidence") == F.lit("medium")).alias(
-            "medium_confidence_count"
-        ),
-        count_when(F.col("stance_confidence") == F.lit("low")).alias(
-            "low_confidence_count"
-        ),
-        count_when(F.col("target_relevance") == F.lit("direct")).alias(
-            "direct_mention_count"
-        ),
-        count_when(F.col("target_relevance") == F.lit("indirect")).alias(
-            "indirect_mention_count"
-        ),
-        count_when(F.col("target_relevance") == F.lit("not_relevant")).alias(
-            "not_relevant_mention_count"
-        ),
-        count_when(
-            F.col("is_included") & (F.col("target_relevance") == F.lit("direct"))
-        ).alias("included_direct_mention_count"),
-        count_when(
-            F.col("is_included") & (F.col("target_relevance") == F.lit("indirect"))
-        ).alias("included_indirect_mention_count"),
-        count_when(
-            F.col("is_included")
-            & (F.col("target_relevance") == F.lit("not_relevant"))
-        ).alias("included_not_relevant_mention_count"),
-    )
-
     return (
-        aggregated.join(documents, on="document_id", how="left")
-        .withColumn(
-            "title",
-            F.coalesce(F.col("document_title"), F.col("stance_title")),
+        stance_rows.groupBy(*group_columns)
+        .agg(
+            F.first("title", ignorenulls=True).alias("title"),
+            F.first("creator", ignorenulls=True).alias("creator"),
+            F.first("author", ignorenulls=True).alias("author"),
+            F.first("language", ignorenulls=True).alias("language"),
+            F.first("internet_archive_id", ignorenulls=True).alias("internet_archive_id"),
+            F.first("source_url", ignorenulls=True).alias("source_url"),
+            F.first("metadata_parse_status", ignorenulls=True).alias(
+                "metadata_parse_status"
+            ),
+            F.first("period_label", ignorenulls=True).alias("period_label"),
+            F.first("publication_year", ignorenulls=True).alias("publication_year"),
+            F.first("publication_month", ignorenulls=True).alias("publication_month"),
+            F.first("publication_day", ignorenulls=True).alias("publication_day"),
+            F.first("publication_date", ignorenulls=True).alias("publication_date"),
+            F.first("date_precision", ignorenulls=True).alias("date_precision"),
+            F.first("date_calendar", ignorenulls=True).alias("date_calendar"),
+            F.max(F.col("conflicts_with_metadata_year").cast("int")).alias(
+                "has_metadata_year_conflict_int"
+            ),
+            F.first("ocr_quality_flag", ignorenulls=True).alias("ocr_quality_flag"),
+            F.count("*").alias("mention_count"),
+            count_when(F.col("is_included")).alias("included_mention_count"),
+            F.avg(F.when(F.col("is_included"), F.col("stance_score"))).alias(
+                "avg_stance_score"
+            ),
+            F.avg(F.when(F.col("is_included"), F.abs(F.col("stance_score")))).alias(
+                "avg_abs_stance_score"
+            ),
+            F.min(F.when(F.col("is_included"), F.col("stance_score"))).alias(
+                "min_stance_score"
+            ),
+            F.max(F.when(F.col("is_included"), F.col("stance_score"))).alias(
+                "max_stance_score"
+            ),
+            count_when(
+                F.col("is_included") & (F.col("stance_label") == F.lit("positive"))
+            ).alias("positive_mention_count"),
+            count_when(
+                F.col("is_included") & (F.col("stance_label") == F.lit("negative"))
+            ).alias("negative_mention_count"),
+            count_when(
+                F.col("is_included")
+                & (F.col("stance_label") == F.lit("neutral_or_unclear"))
+            ).alias("neutral_or_unclear_mention_count"),
+            count_when(
+                F.col("is_included") & (F.col("stance_intensity") == F.lit("weak"))
+            ).alias("weak_stance_mention_count"),
+            count_when(
+                F.col("is_included") & (F.col("stance_intensity") == F.lit("moderate"))
+            ).alias("moderate_stance_mention_count"),
+            count_when(
+                F.col("is_included") & (F.col("stance_intensity") == F.lit("strong"))
+            ).alias("strong_stance_mention_count"),
+            count_when(
+                F.col("is_included")
+                & (F.col("stance_label") == F.lit("negative"))
+                & (F.col("stance_intensity") == F.lit("strong"))
+            ).alias("strong_negative_mention_count"),
+            count_when(F.col("stance_confidence") == F.lit("high")).alias(
+                "high_confidence_count"
+            ),
+            count_when(F.col("stance_confidence") == F.lit("medium")).alias(
+                "medium_confidence_count"
+            ),
+            count_when(F.col("stance_confidence") == F.lit("low")).alias(
+                "low_confidence_count"
+            ),
+            count_when(F.col("target_relevance") == F.lit("direct")).alias(
+                "direct_mention_count"
+            ),
+            count_when(F.col("target_relevance") == F.lit("indirect")).alias(
+                "indirect_mention_count"
+            ),
+            count_when(F.col("target_relevance") == F.lit("not_relevant")).alias(
+                "not_relevant_mention_count"
+            ),
+            count_when(
+                F.col("is_included") & (F.col("target_relevance") == F.lit("direct"))
+            ).alias("included_direct_mention_count"),
+            count_when(
+                F.col("is_included") & (F.col("target_relevance") == F.lit("indirect"))
+            ).alias("included_indirect_mention_count"),
+            count_when(
+                F.col("is_included")
+                & (F.col("target_relevance") == F.lit("not_relevant"))
+            ).alias("included_not_relevant_mention_count"),
         )
         .withColumn(
             "has_metadata_year_conflict",
-            F.col("has_metadata_year_conflict_int") == F.lit(1),
+            F.coalesce(F.col("has_metadata_year_conflict_int"), F.lit(0)) == F.lit(1),
         )
         .withColumn(
             "document_stance_label",
@@ -247,10 +266,6 @@ def build_figure_stance_by_document(
             "title",
             "creator",
             "author",
-            "creators",
-            "metadata_authors",
-            "subjects",
-            "subjects_raw",
             "language",
             "internet_archive_id",
             "source_url",
@@ -262,9 +277,6 @@ def build_figure_stance_by_document(
             "publication_date",
             "date_precision",
             "date_calendar",
-            "date_extractor_name",
-            "date_source_field",
-            "date_confidence",
             "has_metadata_year_conflict",
             "ocr_quality_flag",
             "is_analysis_ready",

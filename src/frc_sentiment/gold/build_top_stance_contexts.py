@@ -30,44 +30,89 @@ def table_name(catalog: str, schema: str, table: str) -> str:
     )
 
 
-def add_period_label(df: DataFrame) -> DataFrame:
-    """Add a dashboard-friendly period label."""
-    return df.withColumn(
-        "period_label",
-        F.when(
-            F.col("publication_year").isNull(),
-            F.lit("Unknown"),
-        )
-        .when(
-            F.col("publication_month").isNull(),
-            F.col("publication_year").cast("string"),
-        )
-        .otherwise(
-            F.concat_ws(
-                "-",
-                F.col("publication_year").cast("string"),
-                F.lpad(F.col("publication_month").cast("string"), 2, "0"),
-            )
-        ),
-    )
-
-
 def build_top_stance_contexts(
     spark: SparkSession,
     catalog: str,
     schema: str,
 ) -> DataFrame:
     """Build a dashboard-ready evidence table of stance context windows."""
-    stance_table = table_name(catalog, schema, "silver_context_stance_ai_query")
-    documents_table = table_name(catalog, schema, "silver_documents")
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    documents_table = table_name(catalog, schema, "silver_dim_documents")
+    dates_table = table_name(catalog, schema, "silver_dim_dates")
+    contexts_table = table_name(catalog, schema, "silver_dim_mention_contexts")
+    stance_categories_table = table_name(catalog, schema, "silver_dim_stance_categories")
+    stance_audit_table = table_name(catalog, schema, "silver_stance_model_audit")
+
+    mentions = spark.table(mentions_table).drop(
+        "publication_year",
+        "publication_month",
+        "publication_day",
+        "publication_date",
+        "date_precision",
+        "date_calendar",
+    )
+
+    documents = spark.table(documents_table).select(
+        "document_id",
+        "title",
+        "creator",
+        "author",
+        "language",
+        "internet_archive_id",
+        "source_url",
+        "metadata_parse_status",
+        "conflicts_with_metadata_year",
+    )
+
+    dates = spark.table(dates_table).select(
+        "date_key",
+        "period_label",
+        "publication_year",
+        "publication_month",
+        "publication_day",
+        "publication_date",
+        "date_precision",
+        "date_calendar",
+    )
+
+    contexts = spark.table(contexts_table).select(
+        "mention_id",
+        "context_window",
+        "context_word_count",
+        "context_start_char",
+        "context_end_char",
+    )
+
+    stance_categories = spark.table(stance_categories_table).select(
+        "stance_category_id",
+        "stance_label",
+        "stance_intensity",
+        "stance_confidence",
+        "target_relevance",
+        "stance_score_method",
+    )
+
+    stance_audit = spark.table(stance_audit_table).select(
+        "stance_audit_id",
+        "mention_id",
+        "stance_method",
+        "stance_model",
+        "model_stance_score_raw",
+        "evidence_text",
+        "evidence_translation_en",
+        "explanation",
+    )
 
     stance_rows = (
-        spark.table(stance_table)
+        mentions.join(documents, on="document_id", how="left")
+        .join(dates, on="date_key", how="left")
+        .join(contexts, on="mention_id", how="left")
+        .join(stance_categories, on="stance_category_id", how="left")
+        .join(stance_audit, on=["stance_audit_id", "mention_id"], how="left")
         .filter(F.col("stance_confidence").isin("medium", "high"))
         .filter(F.col("target_relevance").isin("direct", "indirect"))
         .filter(F.col("evidence_text").isNotNull())
         .filter(F.length(F.trim(F.col("evidence_text"))) > F.lit(0))
-        .transform(add_period_label)
         .withColumn("abs_stance_score", F.abs(F.col("stance_score")))
         .withColumn(
             "confidence_rank",
@@ -81,21 +126,6 @@ def build_top_stance_contexts(
             .when(F.col("target_relevance") == F.lit("indirect"), F.lit(1))
             .otherwise(F.lit(0)),
         )
-    )
-
-    documents = spark.table(documents_table).select(
-        "document_id",
-        F.col("title").alias("document_title"),
-        "creator",
-        "author",
-        "creators",
-        "metadata_authors",
-        "subjects",
-        "subjects_raw",
-        "language",
-        "internet_archive_id",
-        "source_url",
-        "metadata_parse_status",
     )
 
     figure_period_window = Window.partitionBy(
@@ -129,12 +159,7 @@ def build_top_stance_contexts(
     )
 
     return (
-        stance_rows.join(documents, on="document_id", how="left")
-        .withColumn(
-            "title",
-            F.coalesce(F.col("document_title"), F.col("title")),
-        )
-        .withColumn(
+        stance_rows.withColumn(
             "absolute_stance_rank_by_figure_period",
             F.row_number().over(absolute_rank_window),
         )
@@ -157,11 +182,11 @@ def build_top_stance_contexts(
             (F.col("publication_year").isNotNull())
             & (F.col("stance_confidence").isin("medium", "high"))
             & (F.col("target_relevance").isin("direct", "indirect"))
-            & (~F.col("conflicts_with_metadata_year")),
+            & (~F.coalesce(F.col("conflicts_with_metadata_year"), F.lit(False))),
         )
         .withColumn("built_at", F.current_timestamp())
         .select(
-            "stance_candidate_id",
+            "stance_audit_id",
             "mention_id",
             "document_id",
             "figure_id",
@@ -169,10 +194,6 @@ def build_top_stance_contexts(
             "title",
             "creator",
             "author",
-            "creators",
-            "metadata_authors",
-            "subjects",
-            "subjects_raw",
             "language",
             "internet_archive_id",
             "source_url",
@@ -184,9 +205,6 @@ def build_top_stance_contexts(
             "publication_date",
             "date_precision",
             "date_calendar",
-            "date_extractor_name",
-            "date_source_field",
-            "date_confidence",
             "conflicts_with_metadata_year",
             "matched_variant",
             "variant_type",
@@ -207,6 +225,8 @@ def build_top_stance_contexts(
             "explanation",
             "context_window",
             "context_word_count",
+            "context_start_char",
+            "context_end_char",
             "ocr_quality_flag",
             "absolute_stance_rank_by_figure_period",
             "positive_rank_by_figure_period",
