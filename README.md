@@ -1,32 +1,10 @@
 # French Revolution Sentiment Analysis
 
-This project analyzes how sentiment and rhetorical stance toward major figures of the French Revolution changed over time using digitized primary-source pamphlets from the Newberry French Revolution Collection.
+This project analyzes how rhetorical stance toward major figures of the French Revolution changed over time using digitized primary-source pamphlets from the Newberry French Revolution Collection.
 
 The main research question is:
 
-> How did sentiment toward major figures of the French Revolution change across the course of the Revolution?
-
-This is a portfolio project focused on data engineering, PySpark, Databricks, Delta tables, NLP/text processing, and Power BI-ready analytics outputs.
-
-## Current status
-
-The current milestone builds a working ingestion and silver-layer preparation pipeline for a small sample of Newberry French Revolution Collection files.
-
-Completed so far:
-
-- Databricks Asset Bundle setup
-- Unity Catalog schema and raw volume bootstrap
-- local sample download process
-- bronze metadata table
-- bronze OCR text table
-- silver parsed document metadata table
-- silver cleaned OCR text table
-- manually maintained figure lookup table
-- dictionary-based entity mention extraction
-- context window extraction around detected figure mentions
-- data quality summary tables
-
-Sentiment scoring and Power BI reporting are not implemented yet.
+> How did sentiment and rhetorical stance toward major figures of the French Revolution change across the course of the Revolution?
 
 ## Data source
 
@@ -34,7 +12,7 @@ The source data comes from the Newberry French Revolution Collection repository:
 
 <https://github.com/NewberryDIS/frc-data>
 
-The source repository contains digitized pamphlet data from the Newberry Library’s French Revolution Collection.
+The source repository contains digitized pamphlet data from the Newberry Library's French Revolution Collection.
 
 Important source file types:
 
@@ -47,7 +25,7 @@ These are the main input for:
 - OCR text cleaning
 - figure mention detection
 - context window extraction
-- later sentiment or stance scoring
+- stance scoring
 
 In the source repository, OCR text files follow this pattern:
 
@@ -65,6 +43,8 @@ These are used for:
 - title
 - publication year/date
 - language
+- creator/author
+- subject terms
 - Internet Archive identifier
 - source URL
 - joining metadata to OCR text
@@ -79,7 +59,7 @@ Metadata/<document_id>_meta.xml
 
 Structured OCR XML files may contain page-level, line-level, or word-level OCR information.
 
-These are not used in the first version of the pipeline. They may be added later for page-level traceability and improved context windows.
+These are not used in the current version of the pipeline. They may be added later for page-level traceability and improved context windows.
 
 In the source repository, OCR XML files follow this pattern:
 
@@ -89,103 +69,108 @@ XML_for_OCR/<document_id>_djvu.xml
 
 ## Architecture
 
-The project follows a bronze, silver, and gold data model.
+The project follows a medallion architecture using bronze, silver, and gold layers.
 
-Current architecture:
+```mermaid
+flowchart LR
+    source["Newberry FRC GitHub data"]
+    raw["Raw files<br/>Unity Catalog volume"]
+    bronze["Bronze tables<br/>raw OCR + metadata"]
+    silver["Silver model<br/>facts, dimensions, bridges"]
+    gold["Gold tables<br/>dashboard-ready aggregates"]
+    powerbi["Power BI dashboard"]
 
-```text
-Newberry GitHub data
-    ↓
-local raw sample files
-    ↓
-Databricks volume
-    ↓
-bronze Delta tables
-    ↓
-silver parsed and cleaned tables
-    ↓
-future gold dashboard-ready tables
-    ↓
-future Power BI dashboard
+    source --> raw
+    raw --> bronze
+    bronze --> silver
+    silver --> gold
+    gold --> powerbi
 ```
 
-Current Databricks namespace:
+Databricks is used for the main pipeline execution. The project uses:
+
+- Databricks Asset Bundles for job deployment
+- Unity Catalog for table and volume organization
+- Delta tables for bronze, silver, and gold data
+- PySpark for distributed transformations
+- Databricks SQL AI functions for publication date extraction and stance classification
+
+The current Databricks namespace is parameterized in `databricks.yml`.
+
+Example logical namespace:
 
 ```text
-workspace.frc_sentiment
+<catalog>.<schema>
 ```
 
-Raw files are stored in the Unity Catalog volume:
+Raw files are stored in a Unity Catalog volume:
 
 ```text
-/Volumes/workspace/frc_sentiment/raw/
+/Volumes/<catalog>/<schema>/raw/
 ```
 
-## Current tables
+## Data model
+
+The silver layer uses a dimensional model with two main fact tables:
+
+- `silver_fact_documents`
+- `silver_fact_figure_mentions`
+
+These facts are surrounded by document, date, text, figure, creator, subject, context, and stance dimensions.
+
+See the full data model documentation here:
+
+[Data model](data_model.md)
+
+## Main tables
 
 ### Bronze tables
 
 Bronze tables preserve raw source data with minimal transformation.
 
-```text
-workspace.frc_sentiment.bronze_metadata
-workspace.frc_sentiment.bronze_ocr_text
-```
-
-`bronze_metadata` contains one row per metadata XML file.
-
-Key columns:
-
-- `document_id`
-- `file_path`
-- `raw_metadata_xml`
-- `ingested_at`
-
-`bronze_ocr_text` contains one row per OCR text file.
-
-Key columns:
-
-- `document_id`
-- `file_path`
-- `raw_text`
-- `source_file_type`
-- `ingested_at`
+| Table | Grain | Purpose |
+|---|---|---|
+| `bronze_metadata` | One row per metadata XML file | Stores raw metadata XML. |
+| `bronze_ocr_text` | One row per OCR text file | Stores raw OCR text. |
 
 ### Silver tables
 
-Silver tables are cleaned, parsed, or analysis-ready.
+Silver tables contain cleaned, parsed, normalized, and analysis-ready data.
 
-```text
-workspace.frc_sentiment.silver_documents
-workspace.frc_sentiment.silver_clean_text
-workspace.frc_sentiment.silver_figures
-workspace.frc_sentiment.silver_entity_mentions
-workspace.frc_sentiment.silver_context_windows
-workspace.frc_sentiment.silver_data_quality_summary
-workspace.frc_sentiment.silver_figure_mention_summary
-```
+| Table | Grain | Purpose |
+|---|---|---|
+| `silver_dim_documents` | One row per document | Document metadata such as title, language, source URL, and selected publication date. |
+| `silver_fact_documents` | One row per document | Document-level measures and quality flags. |
+| `silver_dim_dates` | One row per selected date or period | Shared date dimension for document and mention facts. |
+| `silver_dim_document_text` | One row per document | Raw and cleaned OCR text. |
+| `silver_dim_figures` | One row per tracked historical figure | Canonical figure records. |
+| `silver_dim_figure_variants` | One row per figure-name variant | Dictionary entries used for matching figure mentions. |
+| `silver_fact_figure_mentions` | One row per detected figure mention | Main mention-level fact table. |
+| `silver_dim_mention_contexts` | One row per mention | Text window around each detected figure mention. |
+| `silver_dim_stance_categories` | One row per stance category combination | Normalized stance label, intensity, confidence, relevance, and score. |
+| `silver_stance_model_audit` | One row per model-scored mention | Raw AI response, evidence text, translation, and explanation. |
+| `silver_dim_creators` | One row per creator/author name | Creator and author dimension. |
+| `silver_bridge_document_creators` | One row per document-creator relationship | Handles documents with multiple creators. |
+| `silver_dim_subjects` | One row per subject term | Subject metadata dimension. |
+| `silver_bridge_document_subjects` | One row per document-subject relationship | Handles documents with multiple subjects. |
+| `silver_publication_date_candidates` | One row per document/date candidate | Stores rule-based and AI-extracted date candidates. |
 
-`silver_documents` parses metadata XML into document-level fields such as title, language, source URL, and publication year.
+### Gold tables
 
-`silver_clean_text` normalizes OCR whitespace, creates lowercase matching text, calculates text length metrics, and assigns OCR quality flags.
+Gold tables are dashboard-ready aggregates designed for Power BI.
 
-`silver_figures` loads a manually maintained figure lookup CSV from:
-
-```text
-data/lookup/figures.csv
-```
-
-`silver_entity_mentions` uses dictionary-based matching to detect figure mentions in cleaned OCR text.
-
-`silver_context_windows` extracts word windows around each detected mention for later sentiment or stance scoring.
-
-`silver_data_quality_summary` stores reusable pipeline-level quality metrics.
-
-`silver_figure_mention_summary` summarizes detected mentions by figure and matched variant.
+| Table | Grain | Purpose |
+|---|---|---|
+| `gold_figure_mentions_by_period` | One row per figure per period | Mention volume and document coverage over time. |
+| `gold_figure_stance_by_period` | One row per figure per period | Average stance and stance distribution over time. |
+| `gold_figure_stance_by_document` | One row per figure per document | Document-level stance aggregation. |
+| `gold_top_stance_contexts` | One row per selected passage | Representative positive and negative context windows. |
+| `gold_figure_stance_by_creator_period` | One row per figure, creator, and period | Stance trends by creator or author. |
+| `gold_figure_stance_by_subject_period` | One row per figure, subject, and period | Stance trends by subject metadata. |
 
 ## Figure lookup
 
-The first version tracks these figures:
+The project currently tracks major figures of the French Revolution, including:
 
 - Louis XVI
 - Marie Antoinette
@@ -201,94 +186,32 @@ The first version tracks these figures:
 - Paul Barras
 - Philippe Égalité
 
-The lookup includes name variants and confidence levels.
+The lookup includes name variants and match-confidence levels.
 
-Highly ambiguous political terms are avoided where they would create too many false positives. For example, plain `égalité` is not treated as a mention of Philippe Égalité because it usually refers to the political concept of equality.
+## Stance scoring approach
 
-## Reproducing the current pipeline
+The project scores stance at the context-window level, not the full-document level.
 
-Authenticate to Databricks:
+This matters because one pamphlet may mention multiple figures with different attitudes. A document-level sentiment score would lose that detail.
 
-```powershell
-databricks auth login --host <workspace-url> --profile <profile-name>
-```
+The stance pipeline works as follows:
 
-Validate and deploy the Databricks Asset Bundle:
+1. detect a figure mention
+2. extract surrounding context
+3. send the context to Databricks `ai_query`
+4. classify stance toward the specific figure
+5. store normalized stance fields in the mention fact table
+6. preserve raw model output and evidence in an audit table
 
-```powershell
-databricks bundle validate --profile <profile-name>
-databricks bundle deploy --profile <profile-name>
-```
+The stance model produces fields such as:
 
-Bootstrap the Databricks schema and raw volume:
+- stance label
+- stance intensity
+- stance confidence
+- target relevance
+- deterministic stance score
+- evidence text
+- English translation
+- explanation
 
-```powershell
-databricks bundle run bootstrap_infrastructure --profile <profile-name>
-```
-
-Load bronze tables:
-
-```powershell
-databricks bundle run bronze_ingestion --profile <profile-name>
-```
-
-Build silver metadata:
-
-```powershell
-databricks bundle run silver_metadata --profile <profile-name>
-```
-
-Build silver cleaned OCR text:
-
-```powershell
-databricks bundle run silver_clean_text --profile <profile-name>
-```
-
-Load figure lookup:
-
-```powershell
-databricks bundle run silver_figures --profile <profile-name>
-```
-
-Extract entity mentions:
-
-```powershell
-databricks bundle run silver_entity_mentions --profile <profile-name>
-```
-
-Build context windows:
-
-```powershell
-databricks bundle run silver_context_windows --profile f<profile-name>
-```
-
-Build data quality summaries:
-
-```powershell
-databricks bundle run silver_quality_summary --profile <profile-name>
-```
-
-## Known limitations
-
-Current limitations:
-
-- The pipeline currently uses a small sample of documents.
-- OCR quality varies and may contain encoding artifacts.
-- Metadata dates are currently parsed primarily at the year level.
-- Entity extraction is dictionary-based and may miss spelling variants.
-- Some title-based variants, such as `le roi` or `la reine`, are ambiguous.
-- Context windows do not yet use page-level OCR XML.
-- Sentiment or stance scoring has not been implemented yet.
-- The current pipeline should not be interpreted as measuring public opinion directly. It analyzes rhetoric in surviving pamphlet texts.
-
-## Planned next steps
-
-Near-term next steps:
-
-1. Improve publication date extraction beyond year-level metadata.
-2. Add tests for metadata parsing, text cleaning, and entity matching.
-3. Expand from the initial sample to a larger document set.
-4. Build an explainable sentiment or stance scoring method for context windows.
-5. Create gold tables for Power BI.
-6. Build an interactive Power BI dashboard.
-```
+The project treats stance scoring as an analytical signal, not as a perfect measurement of historical public opinion.
