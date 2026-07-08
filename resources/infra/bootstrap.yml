@@ -6,7 +6,7 @@ resources:
       tasks:
         - task_key: create_schema_and_volume
           spark_python_task:
-            python_file: ../src/frc_sentiment/infrastructure/bootstrap.py
+            python_file: ../../src/frc_sentiment/infrastructure/bootstrap.py
             parameters:
               - --catalog
               - ${var.catalog}

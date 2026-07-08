@@ -6,7 +6,7 @@ resources:
       tasks:
         - task_key: load_bronze_tables
           spark_python_task:
-            python_file: ../src/frc_sentiment/ingest/load_bronze.py
+            python_file: ../../src/frc_sentiment/ingest/load_bronze.py
             parameters:
               - --catalog
               - ${var.catalog}

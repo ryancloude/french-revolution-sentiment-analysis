@@ -6,7 +6,7 @@ resources:
       tasks:
         - task_key: score_figure_mention_stance
           spark_python_task:
-            python_file: ../src/frc_sentiment/transform/build_figure_mention_stance.py
+            python_file: ../../src/frc_sentiment/transform/build_figure_mention_stance.py
             parameters:
               - --catalog
               - ${var.catalog}

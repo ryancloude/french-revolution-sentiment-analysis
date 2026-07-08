@@ -6,7 +6,7 @@ resources:
       tasks:
         - task_key: build_mention_contexts
           spark_python_task:
-            python_file: ../src/frc_sentiment/transform/build_mention_contexts.py
+            python_file: ../../src/frc_sentiment/transform/build_mention_contexts.py
             parameters:
               - --catalog
               - ${var.catalog}

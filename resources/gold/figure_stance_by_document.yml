@@ -6,7 +6,7 @@ resources:
       tasks:
         - task_key: build_figure_stance_by_document
           spark_python_task:
-            python_file: ../src/frc_sentiment/gold/build_figure_stance_by_document.py
+            python_file: ../../src/frc_sentiment/gold/build_figure_stance_by_document.py
             parameters:
               - --catalog
               - ${var.catalog}

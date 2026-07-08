@@ -6,7 +6,7 @@ resources:
       tasks:
         - task_key: build_top_stance_contexts
           spark_python_task:
-            python_file: ../src/frc_sentiment/gold/build_top_stance_contexts.py
+            python_file: ../../src/frc_sentiment/gold/build_top_stance_contexts.py
             parameters:
               - --catalog
               - ${var.catalog}

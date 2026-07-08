@@ -6,7 +6,7 @@ resources:
       tasks:
         - task_key: build_quality_summary
           spark_python_task:
-            python_file: ../src/frc_sentiment/transform/build_quality_summary.py
+            python_file: ../../src/frc_sentiment/transform/build_quality_summary.py
             parameters:
               - --catalog
               - ${var.catalog}
