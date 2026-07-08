@@ -1,4 +1,4 @@
-"""Build compact data quality summary tables for the current pipeline outputs."""
+"""Build compact data quality summary tables for the dimensional pipeline outputs."""
 
 from __future__ import annotations
 
@@ -69,13 +69,7 @@ def append_table_count(
     full_table_name: str,
 ) -> None:
     """Append a table row-count metric."""
-    rows.append(
-        (
-            metric_group,
-            metric_name,
-            scalar_count(spark, full_table_name),
-        )
-    )
+    rows.append((metric_group, metric_name, scalar_count(spark, full_table_name)))
 
 
 def append_filtered_count(
@@ -105,19 +99,49 @@ def build_data_quality_summary(
     bronze_metadata = table_name(catalog, schema, "bronze_metadata")
     bronze_ocr_text = table_name(catalog, schema, "bronze_ocr_text")
 
-    silver_documents = table_name(catalog, schema, "silver_documents")
-    silver_clean_text = table_name(catalog, schema, "silver_clean_text")
-    silver_figures = table_name(catalog, schema, "silver_figures")
-    silver_entity_mentions = table_name(catalog, schema, "silver_entity_mentions")
-    silver_context_windows = table_name(catalog, schema, "silver_context_windows")
-    silver_date_candidates = table_name(catalog, schema, "silver_date_candidates")
-    silver_ai_date_candidates = table_name(
+    silver_dim_documents = table_name(catalog, schema, "silver_dim_documents")
+    silver_dim_dates = table_name(catalog, schema, "silver_dim_dates")
+    silver_dim_document_text = table_name(catalog, schema, "silver_dim_document_text")
+    silver_fact_documents = table_name(catalog, schema, "silver_fact_documents")
+    silver_dim_creators = table_name(catalog, schema, "silver_dim_creators")
+    silver_bridge_document_creators = table_name(
         catalog,
         schema,
-        "silver_date_candidates_ai_extract",
+        "silver_bridge_document_creators",
     )
-    silver_selected_dates = table_name(catalog, schema, "silver_selected_publication_dates")
-    silver_context_stance = table_name(catalog, schema, "silver_context_stance_ai_query")
+    silver_dim_subjects = table_name(catalog, schema, "silver_dim_subjects")
+    silver_bridge_document_subjects = table_name(
+        catalog,
+        schema,
+        "silver_bridge_document_subjects",
+    )
+    silver_dim_figures = table_name(catalog, schema, "silver_dim_figures")
+    silver_dim_figure_variants = table_name(
+        catalog,
+        schema,
+        "silver_dim_figure_variants",
+    )
+    silver_publication_date_candidates = table_name(
+        catalog,
+        schema,
+        "silver_publication_date_candidates",
+    )
+    silver_fact_figure_mentions = table_name(
+        catalog,
+        schema,
+        "silver_fact_figure_mentions",
+    )
+    silver_dim_mention_contexts = table_name(
+        catalog,
+        schema,
+        "silver_dim_mention_contexts",
+    )
+    silver_dim_stance_categories = table_name(
+        catalog,
+        schema,
+        "silver_dim_stance_categories",
+    )
+    silver_stance_model_audit = table_name(catalog, schema, "silver_stance_model_audit")
 
     gold_mentions_by_period = table_name(catalog, schema, "gold_figure_mentions_by_period")
     gold_stance_by_period = table_name(catalog, schema, "gold_figure_stance_by_period")
@@ -139,95 +163,161 @@ def build_data_quality_summary(
     append_table_count(rows, spark, "bronze", "bronze_metadata_rows", bronze_metadata)
     append_table_count(rows, spark, "bronze", "bronze_ocr_text_rows", bronze_ocr_text)
 
-    append_table_count(rows, spark, "metadata", "silver_documents_rows", silver_documents)
-    append_filtered_count(
+    append_table_count(
         rows,
         spark,
-        "metadata",
-        "documents_with_valid_year",
-        silver_documents,
-        "publication_year IS NOT NULL",
+        "documents",
+        "silver_dim_documents_rows",
+        silver_dim_documents,
+    )
+    append_table_count(
+        rows,
+        spark,
+        "documents",
+        "silver_fact_documents_rows",
+        silver_fact_documents,
     )
     append_filtered_count(
         rows,
         spark,
-        "metadata",
-        "documents_missing_year",
-        silver_documents,
-        "publication_year IS NULL",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "metadata",
-        "documents_with_publication_month",
-        silver_documents,
-        "publication_month IS NOT NULL",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "metadata",
-        "documents_with_publication_day",
-        silver_documents,
-        "publication_day IS NOT NULL",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "metadata",
-        "documents_with_creator",
-        silver_documents,
-        "creator IS NOT NULL",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "metadata",
-        "documents_with_author",
-        silver_documents,
-        "author IS NOT NULL",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "metadata",
-        "documents_with_multiple_creators",
-        silver_documents,
-        "size(creators) > 1",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "metadata",
-        "documents_with_subjects",
-        silver_documents,
-        "size(subjects) > 0",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "metadata",
+        "documents",
         "documents_with_ocr_text",
-        silver_documents,
+        silver_fact_documents,
         "has_ocr_text = true",
     )
     append_filtered_count(
         rows,
         spark,
-        "metadata",
+        "documents",
         "documents_without_ocr_text",
-        silver_documents,
+        silver_fact_documents,
         "has_ocr_text = false",
     )
+    append_filtered_count(
+        rows,
+        spark,
+        "documents",
+        "documents_with_valid_publication_year",
+        silver_fact_documents,
+        "has_valid_publication_year = true",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "documents",
+        "documents_with_publication_month",
+        silver_fact_documents,
+        "has_publication_month = true",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "documents",
+        "documents_with_publication_day",
+        silver_fact_documents,
+        "has_publication_day = true",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "documents",
+        "analysis_ready_documents",
+        silver_fact_documents,
+        "included_in_analysis_flag = true",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "documents",
+        "metadata_parse_success_documents",
+        silver_fact_documents,
+        "metadata_parse_success_flag = true",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "documents",
+        "documents_with_creator",
+        silver_dim_documents,
+        "creator IS NOT NULL",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "documents",
+        "documents_with_author",
+        silver_dim_documents,
+        "author IS NOT NULL",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "documents",
+        "documents_with_metadata_year_conflict",
+        silver_dim_documents,
+        "conflicts_with_metadata_year = true",
+    )
 
-    append_table_count(rows, spark, "text_quality", "silver_clean_text_rows", silver_clean_text)
+    append_table_count(
+        rows,
+        spark,
+        "dates",
+        "silver_dim_dates_rows",
+        silver_dim_dates,
+    )
+    append_table_count(
+        rows,
+        spark,
+        "dates",
+        "silver_publication_date_candidate_rows",
+        silver_publication_date_candidates,
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "dates",
+        "rule_based_publication_date_candidates",
+        silver_publication_date_candidates,
+        "extractor_name = 'rule_based_metadata_title_ocr'",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "dates",
+        "ai_publication_date_candidates",
+        silver_publication_date_candidates,
+        "extractor_name = 'databricks_ai_extract'",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "dates",
+        "selected_publication_date_candidates",
+        silver_publication_date_candidates,
+        "selected_for_document = true",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "dates",
+        "selected_ai_publication_date_candidates",
+        silver_publication_date_candidates,
+        "selected_for_document = true AND extractor_name = 'databricks_ai_extract'",
+    )
+
+    append_table_count(
+        rows,
+        spark,
+        "text_quality",
+        "silver_dim_document_text_rows",
+        silver_dim_document_text,
+    )
     append_filtered_count(
         rows,
         spark,
         "text_quality",
         "usable_ocr_documents",
-        silver_clean_text,
+        silver_fact_documents,
         "ocr_quality_flag = 'usable'",
     )
     append_filtered_count(
@@ -235,7 +325,7 @@ def build_data_quality_summary(
         spark,
         "text_quality",
         "very_short_text_documents",
-        silver_clean_text,
+        silver_fact_documents,
         "ocr_quality_flag = 'very_short_text'",
     )
     append_filtered_count(
@@ -243,7 +333,7 @@ def build_data_quality_summary(
         spark,
         "text_quality",
         "empty_text_documents",
-        silver_clean_text,
+        silver_fact_documents,
         "ocr_quality_flag = 'empty_text'",
     )
     append_filtered_count(
@@ -251,207 +341,154 @@ def build_data_quality_summary(
         spark,
         "text_quality",
         "possible_encoding_artifact_documents",
-        silver_clean_text,
+        silver_fact_documents,
         "ocr_quality_flag = 'possible_encoding_artifacts'",
     )
+    append_filtered_count(
+        rows,
+        spark,
+        "text_quality",
+        "documents_with_encoding_artifacts",
+        silver_fact_documents,
+        "contains_encoding_artifacts = true",
+    )
 
-    append_table_count(rows, spark, "figures", "figure_variant_rows", silver_figures)
-    rows.append(
-        (
-            "figures",
-            "distinct_figures",
-            scalar_distinct_count(spark, silver_figures, "figure_id"),
-        )
+    append_table_count(rows, spark, "creators", "creator_rows", silver_dim_creators)
+    append_table_count(
+        rows,
+        spark,
+        "creators",
+        "document_creator_bridge_rows",
+        silver_bridge_document_creators,
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "creators",
+        "unknown_creator_bridge_rows",
+        silver_bridge_document_creators,
+        "creator_source = 'unknown'",
+    )
+
+    append_table_count(rows, spark, "subjects", "subject_rows", silver_dim_subjects)
+    append_table_count(
+        rows,
+        spark,
+        "subjects",
+        "document_subject_bridge_rows",
+        silver_bridge_document_subjects,
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "subjects",
+        "unknown_subject_bridge_rows",
+        silver_bridge_document_subjects,
+        "subject_source = 'unknown'",
+    )
+
+    append_table_count(rows, spark, "figures", "distinct_figures", silver_dim_figures)
+    append_table_count(
+        rows,
+        spark,
+        "figures",
+        "figure_variant_rows",
+        silver_dim_figure_variants,
     )
 
     append_table_count(
         rows,
         spark,
-        "entity_mentions",
-        "silver_entity_mentions_rows",
-        silver_entity_mentions,
+        "mentions",
+        "silver_fact_figure_mentions_rows",
+        silver_fact_figure_mentions,
     )
     append_filtered_count(
         rows,
         spark,
-        "entity_mentions",
+        "mentions",
         "high_confidence_mentions",
-        silver_entity_mentions,
+        silver_fact_figure_mentions,
         "match_confidence = 'high'",
     )
     append_filtered_count(
         rows,
         spark,
-        "entity_mentions",
+        "mentions",
         "medium_confidence_mentions",
-        silver_entity_mentions,
+        silver_fact_figure_mentions,
         "match_confidence = 'medium'",
     )
     append_filtered_count(
         rows,
         spark,
-        "entity_mentions",
+        "mentions",
         "low_confidence_mentions",
-        silver_entity_mentions,
+        silver_fact_figure_mentions,
         "match_confidence = 'low'",
+    )
+    append_filtered_count(
+        rows,
+        spark,
+        "mentions",
+        "analysis_ready_mentions",
+        silver_fact_figure_mentions,
+        "is_analysis_ready = true",
     )
 
     append_table_count(
         rows,
         spark,
-        "context_windows",
-        "silver_context_windows_rows",
-        silver_context_windows,
+        "contexts",
+        "silver_dim_mention_contexts_rows",
+        silver_dim_mention_contexts,
     )
     append_filtered_count(
         rows,
         spark,
-        "context_windows",
-        "empty_context_windows",
-        silver_context_windows,
+        "contexts",
+        "empty_mention_contexts",
+        silver_dim_mention_contexts,
         "context_window = ''",
     )
 
     append_table_count(
         rows,
         spark,
-        "date_candidates",
-        "rule_based_date_candidate_rows",
-        silver_date_candidates,
+        "stance",
+        "silver_dim_stance_category_rows",
+        silver_dim_stance_categories,
     )
     append_table_count(
         rows,
         spark,
-        "date_candidates",
-        "ai_extract_date_candidate_rows",
-        silver_ai_date_candidates,
-    )
-    append_table_count(
-        rows,
-        spark,
-        "date_candidates",
-        "selected_publication_date_rows",
-        silver_selected_dates,
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "date_candidates",
-        "selected_dates_with_year",
-        silver_selected_dates,
-        "selected_publication_year IS NOT NULL",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "date_candidates",
-        "selected_dates_with_month",
-        silver_selected_dates,
-        "selected_publication_month IS NOT NULL",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "date_candidates",
-        "selected_dates_with_day",
-        silver_selected_dates,
-        "selected_publication_day IS NOT NULL",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "date_candidates",
-        "selected_dates_conflicting_with_metadata_year",
-        silver_selected_dates,
-        "conflicts_with_metadata_year = true",
-    )
-
-    append_table_count(
-        rows,
-        spark,
         "stance",
-        "silver_context_stance_rows",
-        silver_context_stance,
+        "silver_stance_model_audit_rows",
+        silver_stance_model_audit,
     )
     append_filtered_count(
         rows,
         spark,
         "stance",
-        "stance_high_confidence_rows",
-        silver_context_stance,
-        "stance_confidence = 'high'",
+        "stance_scored_mentions",
+        silver_fact_figure_mentions,
+        "is_stance_scored = true",
     )
     append_filtered_count(
         rows,
         spark,
         "stance",
-        "stance_medium_confidence_rows",
-        silver_context_stance,
-        "stance_confidence = 'medium'",
+        "medium_high_confidence_stance_mentions",
+        silver_fact_figure_mentions,
+        "is_medium_or_high_stance_confidence = true",
     )
     append_filtered_count(
         rows,
         spark,
         "stance",
-        "stance_low_confidence_rows",
-        silver_context_stance,
-        "stance_confidence = 'low'",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "stance",
-        "stance_included_rows",
-        silver_context_stance,
-        "stance_confidence IN ('medium', 'high')",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "stance",
-        "stance_positive_rows",
-        silver_context_stance,
-        "stance_label = 'positive'",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "stance",
-        "stance_negative_rows",
-        silver_context_stance,
-        "stance_label = 'negative'",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "stance",
-        "stance_neutral_or_unclear_rows",
-        silver_context_stance,
-        "stance_label = 'neutral_or_unclear'",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "stance",
-        "stance_direct_rows",
-        silver_context_stance,
-        "target_relevance = 'direct'",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "stance",
-        "stance_indirect_rows",
-        silver_context_stance,
-        "target_relevance = 'indirect'",
-    )
-    append_filtered_count(
-        rows,
-        spark,
-        "stance",
-        "stance_not_relevant_rows",
-        silver_context_stance,
-        "target_relevance = 'not_relevant'",
+        "direct_or_indirect_relevance_mentions",
+        silver_fact_figure_mentions,
+        "is_direct_or_indirect_relevance = true",
     )
 
     append_table_count(
@@ -546,10 +583,10 @@ def build_figure_mention_summary(
     schema: str,
 ) -> DataFrame:
     """Build mention counts by figure and matched variant."""
-    silver_entity_mentions = table_name(catalog, schema, "silver_entity_mentions")
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
 
     return (
-        spark.table(silver_entity_mentions)
+        spark.table(mentions_table)
         .groupBy(
             "figure_id",
             "canonical_name",
@@ -574,10 +611,22 @@ def build_stance_distribution_summary(
     schema: str,
 ) -> DataFrame:
     """Build stance output distribution summary for model monitoring."""
-    silver_context_stance = table_name(catalog, schema, "silver_context_stance_ai_query")
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    stance_categories_table = table_name(catalog, schema, "silver_dim_stance_categories")
+
+    mentions = spark.table(mentions_table).drop("stance_score")
+
+    stance_categories = spark.table(stance_categories_table).select(
+        "stance_category_id",
+        "stance_label",
+        "stance_intensity",
+        "stance_score",
+        "stance_confidence",
+        "target_relevance",
+    )
 
     return (
-        spark.table(silver_context_stance)
+        mentions.join(stance_categories, on="stance_category_id", how="left")
         .groupBy(
             "figure_id",
             "canonical_name",
@@ -591,9 +640,7 @@ def build_stance_distribution_summary(
             F.count("*").alias("stance_row_count"),
             F.countDistinct("document_id").alias("document_count"),
             F.countDistinct("mention_id").alias("mention_count"),
-            F.avg("abs_stance_score").alias("avg_abs_stance_score")
-            if "abs_stance_score" in spark.table(silver_context_stance).columns
-            else F.avg(F.abs(F.col("stance_score"))).alias("avg_abs_stance_score"),
+            F.avg(F.abs(F.col("stance_score"))).alias("avg_abs_stance_score"),
         )
         .withColumn("summary_created_at", F.current_timestamp())
         .orderBy(
