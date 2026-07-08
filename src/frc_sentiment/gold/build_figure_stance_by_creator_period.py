@@ -43,46 +43,6 @@ def safe_ratio(numerator: str, denominator: str) -> Column:
     ).otherwise(F.lit(None).cast("double"))
 
 
-def creator_entries_column() -> Column:
-    """Build creator/author entries with source labels for explosion."""
-    creators_entries = F.transform(
-        F.col("creators"),
-        lambda creator: F.struct(
-            creator.alias("creator_or_author"),
-            F.lit("creator").alias("creator_source"),
-        ),
-    )
-
-    metadata_author_entries = F.transform(
-        F.col("metadata_authors"),
-        lambda author: F.struct(
-            author.alias("creator_or_author"),
-            F.lit("author").alias("creator_source"),
-        ),
-    )
-
-    display_author_entry = F.array(
-        F.struct(
-            F.col("author").alias("creator_or_author"),
-            F.lit("display_author").alias("creator_source"),
-        )
-    )
-
-    unknown_entry = F.array(
-        F.struct(
-            F.lit("Unknown").alias("creator_or_author"),
-            F.lit("unknown").alias("creator_source"),
-        )
-    )
-
-    return (
-        F.when(F.size(F.col("creators")) > F.lit(0), creators_entries)
-        .when(F.size(F.col("metadata_authors")) > F.lit(0), metadata_author_entries)
-        .when(F.col("author").isNotNull(), display_author_entry)
-        .otherwise(unknown_entry)
-    )
-
-
 def build_figure_stance_by_creator_period(
     spark: SparkSession,
     catalog: str,
@@ -90,28 +50,49 @@ def build_figure_stance_by_creator_period(
 ) -> DataFrame:
     """Aggregate document-level figure stance by creator/author and period."""
     document_stance_table = table_name(catalog, schema, "gold_figure_stance_by_document")
+    bridge_creators_table = table_name(catalog, schema, "silver_bridge_document_creators")
+    creators_table = table_name(catalog, schema, "silver_dim_creators")
 
-    document_rows = spark.table(document_stance_table)
+    document_stance = spark.table(document_stance_table)
 
-    exploded_creators = (
-        document_rows.withColumn("creator_entry", F.explode(creator_entries_column()))
-        .withColumn("creator_or_author", F.col("creator_entry.creator_or_author"))
-        .withColumn("creator_source", F.col("creator_entry.creator_source"))
-        .drop("creator_entry")
+    document_creators = (
+        spark.table(bridge_creators_table)
+        .join(
+            spark.table(creators_table),
+            on="creator_id",
+            how="left",
+        )
+        .select(
+            "document_id",
+            "creator_id",
+            "creator_name",
+            "creator_source",
+            "creator_position",
+        )
+    )
+
+    creator_rows = document_stance.join(
+        document_creators,
+        on="document_id",
+        how="left",
+    ).withColumn(
+        "creator_name",
+        F.coalesce(F.col("creator_name"), F.lit("Unknown")),
     )
 
     group_columns = [
         "period_label",
         "publication_year",
         "publication_month",
-        "creator_or_author",
+        "creator_id",
+        "creator_name",
         "creator_source",
         "figure_id",
         "canonical_name",
     ]
 
     return (
-        exploded_creators.groupBy(*group_columns)
+        creator_rows.groupBy(*group_columns)
         .agg(
             F.countDistinct("document_id").alias("document_count"),
             F.sum("mention_count").alias("mention_count"),
@@ -210,7 +191,8 @@ def build_figure_stance_by_creator_period(
             "period_label",
             "publication_year",
             "publication_month",
-            "creator_or_author",
+            "creator_id",
+            "creator_name",
             "creator_source",
             "figure_id",
             "canonical_name",
@@ -255,7 +237,7 @@ def build_figure_stance_by_creator_period(
         .orderBy(
             "publication_year",
             "publication_month",
-            "creator_or_author",
+            "creator_name",
             "canonical_name",
         )
     )

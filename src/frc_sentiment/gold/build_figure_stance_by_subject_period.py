@@ -43,14 +43,6 @@ def safe_ratio(numerator: str, denominator: str) -> Column:
     ).otherwise(F.lit(None).cast("double"))
 
 
-def subject_entries_column() -> Column:
-    """Build subject entries for explosion."""
-    return F.when(
-        F.size(F.col("subjects")) > F.lit(0),
-        F.col("subjects"),
-    ).otherwise(F.array(F.lit("Unknown")))
-
-
 def build_figure_stance_by_subject_period(
     spark: SparkSession,
     catalog: str,
@@ -58,25 +50,49 @@ def build_figure_stance_by_subject_period(
 ) -> DataFrame:
     """Aggregate document-level figure stance by metadata subject and period."""
     document_stance_table = table_name(catalog, schema, "gold_figure_stance_by_document")
+    bridge_subjects_table = table_name(catalog, schema, "silver_bridge_document_subjects")
+    subjects_table = table_name(catalog, schema, "silver_dim_subjects")
 
-    document_rows = spark.table(document_stance_table)
+    document_stance = spark.table(document_stance_table)
 
-    exploded_subjects = document_rows.withColumn(
+    document_subjects = (
+        spark.table(bridge_subjects_table)
+        .join(
+            spark.table(subjects_table),
+            on="subject_id",
+            how="left",
+        )
+        .select(
+            "document_id",
+            "subject_id",
+            "subject",
+            "subject_source",
+            "subject_position",
+        )
+    )
+
+    subject_rows = document_stance.join(
+        document_subjects,
+        on="document_id",
+        how="left",
+    ).withColumn(
         "subject",
-        F.explode(subject_entries_column()),
+        F.coalesce(F.col("subject"), F.lit("Unknown")),
     )
 
     group_columns = [
         "period_label",
         "publication_year",
         "publication_month",
+        "subject_id",
         "subject",
+        "subject_source",
         "figure_id",
         "canonical_name",
     ]
 
     return (
-        exploded_subjects.groupBy(*group_columns)
+        subject_rows.groupBy(*group_columns)
         .agg(
             F.countDistinct("document_id").alias("document_count"),
             F.sum("mention_count").alias("mention_count"),
@@ -175,7 +191,9 @@ def build_figure_stance_by_subject_period(
             "period_label",
             "publication_year",
             "publication_month",
+            "subject_id",
             "subject",
+            "subject_source",
             "figure_id",
             "canonical_name",
             "is_analysis_ready",
