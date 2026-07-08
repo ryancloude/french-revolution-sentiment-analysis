@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 VALID_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -30,6 +30,19 @@ def table_name(catalog: str, schema: str, table: str) -> str:
     )
 
 
+def count_when(condition: Column) -> Column:
+    """Count rows matching a condition."""
+    return F.sum(F.when(condition, F.lit(1)).otherwise(F.lit(0)))
+
+
+def safe_ratio(numerator: str, denominator: str) -> Column:
+    """Return numerator / denominator, or null when denominator is zero."""
+    return F.when(
+        F.col(denominator) > F.lit(0),
+        F.col(numerator).cast("double") / F.col(denominator).cast("double"),
+    ).otherwise(F.lit(None).cast("double"))
+
+
 def build_figure_mentions_by_period(
     spark: SparkSession,
     catalog: str,
@@ -38,15 +51,17 @@ def build_figure_mentions_by_period(
     """Aggregate figure mentions into a dashboard-ready table."""
     mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
     dates_table = table_name(catalog, schema, "silver_dim_dates")
+    stance_categories_table = table_name(catalog, schema, "silver_dim_stance_categories")
 
     mentions = spark.table(mentions_table).drop(
-    "publication_year",
-    "publication_month",
-    "publication_day",
-    "publication_date",
-    "date_precision",
-    "date_calendar",
-)
+        "publication_year",
+        "publication_month",
+        "publication_day",
+        "publication_date",
+        "date_precision",
+        "date_calendar",
+    )
+
     dates = spark.table(dates_table).select(
         "date_key",
         "period_label",
@@ -58,9 +73,26 @@ def build_figure_mentions_by_period(
         "date_calendar",
     )
 
-    return (
+    stance_categories = spark.table(stance_categories_table).select(
+        "stance_category_id",
+        "stance_label",
+        "stance_intensity",
+        "stance_confidence",
+        "target_relevance",
+    )
+
+    mention_rows = (
         mentions.join(dates, on="date_key", how="left")
-        .groupBy(
+        .join(stance_categories, on="stance_category_id", how="left")
+        .withColumn(
+            "is_included_stance",
+            (F.col("stance_confidence").isin("medium", "high"))
+            & F.col("stance_score").isNotNull(),
+        )
+    )
+
+    return (
+        mention_rows.groupBy(
             "period_label",
             "publication_year",
             "publication_month",
@@ -74,15 +106,63 @@ def build_figure_mentions_by_period(
             F.count("*").alias("mention_count"),
             F.countDistinct("document_id").alias("document_count"),
             F.countDistinct("variant_id").alias("matched_variant_count"),
-            F.sum(F.when(F.col("is_high_confidence_match"), 1).otherwise(0)).alias(
+            count_when(F.col("is_high_confidence_match")).alias(
                 "high_confidence_match_count"
             ),
-            F.sum(F.when(F.col("is_analysis_ready"), 1).otherwise(0)).alias(
+            count_when(F.col("is_analysis_ready")).alias(
                 "analysis_ready_mention_count"
             ),
             F.countDistinct(
                 F.when(F.col("is_analysis_ready"), F.col("document_id"))
             ).alias("analysis_ready_document_count"),
+            count_when(F.col("is_included_stance")).alias(
+                "included_stance_mention_count"
+            ),
+            F.countDistinct(
+                F.when(F.col("is_included_stance"), F.col("document_id"))
+            ).alias("included_stance_document_count"),
+            count_when(
+                F.col("is_included_stance")
+                & (F.col("stance_label") == F.lit("positive"))
+            ).alias("positive_mention_count"),
+            count_when(
+                F.col("is_included_stance")
+                & (F.col("stance_label") == F.lit("negative"))
+            ).alias("negative_mention_count"),
+            count_when(
+                F.col("is_included_stance")
+                & (F.col("stance_label") == F.lit("neutral_or_unclear"))
+            ).alias("neutral_or_unclear_mention_count"),
+            count_when(
+                F.col("is_included_stance")
+                & (F.col("stance_intensity") == F.lit("weak"))
+            ).alias("weak_stance_mention_count"),
+            count_when(
+                F.col("is_included_stance")
+                & (F.col("stance_intensity") == F.lit("moderate"))
+            ).alias("moderate_stance_mention_count"),
+            count_when(
+                F.col("is_included_stance")
+                & (F.col("stance_intensity") == F.lit("strong"))
+            ).alias("strong_stance_mention_count"),
+            count_when(F.col("stance_confidence") == F.lit("high")).alias(
+                "high_stance_confidence_count"
+            ),
+            count_when(F.col("stance_confidence") == F.lit("medium")).alias(
+                "medium_stance_confidence_count"
+            ),
+            count_when(F.col("stance_confidence") == F.lit("low")).alias(
+                "low_stance_confidence_count"
+            ),
+            count_when(F.col("target_relevance") == F.lit("direct")).alias(
+                "direct_mention_count"
+            ),
+            count_when(F.col("target_relevance") == F.lit("indirect")).alias(
+                "indirect_mention_count"
+            ),
+            count_when(F.col("target_relevance") == F.lit("not_relevant")).alias(
+                "not_relevant_mention_count"
+            ),
             F.min("publication_date").alias("min_publication_date"),
             F.max("publication_date").alias("max_publication_date"),
         )
@@ -94,6 +174,25 @@ def build_figure_mentions_by_period(
             "is_analysis_ready",
             (F.col("publication_year").isNotNull())
             & (F.col("analysis_ready_mention_count") > F.lit(0)),
+        )
+        .withColumn(
+            "included_stance_mention_share",
+            safe_ratio("included_stance_mention_count", "mention_count"),
+        )
+        .withColumn(
+            "positive_mention_share",
+            safe_ratio("positive_mention_count", "included_stance_mention_count"),
+        )
+        .withColumn(
+            "negative_mention_share",
+            safe_ratio("negative_mention_count", "included_stance_mention_count"),
+        )
+        .withColumn(
+            "neutral_or_unclear_mention_share",
+            safe_ratio(
+                "neutral_or_unclear_mention_count",
+                "included_stance_mention_count",
+            ),
         )
         .withColumn("built_at", F.current_timestamp())
         .select(
@@ -113,6 +212,24 @@ def build_figure_mentions_by_period(
             "high_confidence_match_count",
             "analysis_ready_mention_count",
             "analysis_ready_document_count",
+            "included_stance_mention_count",
+            "included_stance_document_count",
+            "included_stance_mention_share",
+            "positive_mention_count",
+            "negative_mention_count",
+            "neutral_or_unclear_mention_count",
+            "positive_mention_share",
+            "negative_mention_share",
+            "neutral_or_unclear_mention_share",
+            "weak_stance_mention_count",
+            "moderate_stance_mention_count",
+            "strong_stance_mention_count",
+            "high_stance_confidence_count",
+            "medium_stance_confidence_count",
+            "low_stance_confidence_count",
+            "direct_mention_count",
+            "indirect_mention_count",
+            "not_relevant_mention_count",
             "min_publication_date",
             "max_publication_date",
             "built_at",
