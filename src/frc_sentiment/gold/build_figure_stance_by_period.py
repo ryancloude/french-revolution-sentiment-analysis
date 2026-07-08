@@ -43,25 +43,50 @@ def safe_ratio(numerator: str, denominator: str) -> Column:
     ).otherwise(F.lit(None).cast("double"))
 
 
-def add_period_label(df: DataFrame) -> DataFrame:
-    """Add a dashboard-friendly period label."""
-    return df.withColumn(
+def build_stance_rows(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> DataFrame:
+    """Join figure mention facts to date and stance dimensions."""
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    dates_table = table_name(catalog, schema, "silver_dim_dates")
+    stance_categories_table = table_name(catalog, schema, "silver_dim_stance_categories")
+
+    mentions = spark.table(mentions_table).drop(
+    "publication_year",
+    "publication_month",
+    "publication_day",
+    "publication_date",
+    "date_precision",
+    "date_calendar",
+)
+    dates = spark.table(dates_table).select(
+        "date_key",
         "period_label",
-        F.when(
-            F.col("publication_year").isNull(),
-            F.lit("Unknown"),
+        "publication_year",
+        "publication_month",
+        "publication_day",
+        "publication_date",
+        "date_precision",
+        "date_calendar",
+    )
+    stance_categories = spark.table(stance_categories_table).select(
+        "stance_category_id",
+        "stance_label",
+        "stance_intensity",
+        "stance_confidence",
+        "target_relevance",
+    )
+
+    return (
+        mentions.join(dates, on="date_key", how="left")
+        .join(stance_categories, on="stance_category_id", how="left")
+        .withColumn(
+            "is_included",
+            (F.col("stance_confidence").isin("medium", "high"))
+            & F.col("stance_score").isNotNull(),
         )
-        .when(
-            F.col("publication_month").isNull(),
-            F.col("publication_year").cast("string"),
-        )
-        .otherwise(
-            F.concat_ws(
-                "-",
-                F.col("publication_year").cast("string"),
-                F.lpad(F.col("publication_month").cast("string"), 2, "0"),
-            )
-        ),
     )
 
 
@@ -70,8 +95,12 @@ def build_figure_stance_by_period(
     catalog: str,
     schema: str,
 ) -> DataFrame:
-    """Aggregate context-level stance scores into a dashboard-ready gold table."""
-    stance_table = table_name(catalog, schema, "silver_context_stance_ai_query")
+    """Aggregate figure mention stance scores into a dashboard-ready gold table."""
+    stance_rows = build_stance_rows(
+        spark=spark,
+        catalog=catalog,
+        schema=schema,
+    )
 
     period_group_columns = [
         "period_label",
@@ -80,16 +109,6 @@ def build_figure_stance_by_period(
         "figure_id",
         "canonical_name",
     ]
-
-    stance_rows = (
-        spark.table(stance_table)
-        .withColumn(
-            "is_included",
-            (F.col("stance_confidence").isin("medium", "high"))
-            & F.col("stance_score").isNotNull(),
-        )
-        .transform(add_period_label)
-    )
 
     mention_agg = stance_rows.groupBy(*period_group_columns).agg(
         F.count("*").alias("mention_count"),
@@ -164,9 +183,6 @@ def build_figure_stance_by_period(
         ),
         count_when(F.col("date_precision") == F.lit("year")).alias(
             "year_precision_count"
-        ),
-        count_when(F.col("conflicts_with_metadata_year")).alias(
-            "metadata_year_conflict_count"
         ),
         F.min("publication_date").alias("min_publication_date"),
         F.max("publication_date").alias("max_publication_date"),
@@ -265,8 +281,7 @@ def build_figure_stance_by_period(
         .withColumn(
             "is_analysis_ready",
             (F.col("publication_year").isNotNull())
-            & (F.col("included_mention_count") > F.lit(0))
-            & (F.col("metadata_year_conflict_count") == F.lit(0)),
+            & (F.col("included_mention_count") > F.lit(0)),
         )
         .withColumn("built_at", F.current_timestamp())
         .select(
@@ -315,7 +330,6 @@ def build_figure_stance_by_period(
             "day_precision_count",
             "month_precision_count",
             "year_precision_count",
-            "metadata_year_conflict_count",
             "min_publication_date",
             "max_publication_date",
             "built_at",

@@ -36,19 +36,36 @@ def build_figure_mentions_by_period(
     schema: str,
 ) -> DataFrame:
     """Aggregate figure mentions into a dashboard-ready table."""
-    mentions_table = table_name(catalog, schema, "silver_entity_mentions")
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    dates_table = table_name(catalog, schema, "silver_dim_dates")
 
-    mentions = spark.table(mentions_table)
+    mentions = spark.table(mentions_table).drop(
+    "publication_year",
+    "publication_month",
+    "publication_day",
+    "publication_date",
+    "date_precision",
+    "date_calendar",
+)
+    dates = spark.table(dates_table).select(
+        "date_key",
+        "period_label",
+        "publication_year",
+        "publication_month",
+        "publication_day",
+        "publication_date",
+        "date_precision",
+        "date_calendar",
+    )
 
     return (
-        mentions.groupBy(
+        mentions.join(dates, on="date_key", how="left")
+        .groupBy(
+            "period_label",
             "publication_year",
             "publication_month",
             "date_precision",
             "date_calendar",
-            "date_extractor_name",
-            "date_confidence",
-            "conflicts_with_metadata_year",
             "figure_id",
             "canonical_name",
             "match_confidence",
@@ -56,36 +73,27 @@ def build_figure_mentions_by_period(
         .agg(
             F.count("*").alias("mention_count"),
             F.countDistinct("document_id").alias("document_count"),
-            F.countDistinct("matched_variant").alias("matched_variant_count"),
+            F.countDistinct("variant_id").alias("matched_variant_count"),
+            F.sum(F.when(F.col("is_high_confidence_match"), 1).otherwise(0)).alias(
+                "high_confidence_match_count"
+            ),
+            F.sum(F.when(F.col("is_analysis_ready"), 1).otherwise(0)).alias(
+                "analysis_ready_mention_count"
+            ),
+            F.countDistinct(
+                F.when(F.col("is_analysis_ready"), F.col("document_id"))
+            ).alias("analysis_ready_document_count"),
             F.min("publication_date").alias("min_publication_date"),
             F.max("publication_date").alias("max_publication_date"),
         )
         .withColumn(
-            "period_label",
-            F.when(
-                F.col("publication_year").isNull(),
-                F.lit("Unknown"),
-            )
-            .when(
-                F.col("publication_month").isNull(),
-                F.col("publication_year").cast("string"),
-            )
-            .otherwise(
-                F.concat_ws(
-                    "-",
-                    F.col("publication_year").cast("string"),
-                    F.lpad(F.col("publication_month").cast("string"), 2, "0"),
-                )
-            ),
-        )
-        .withColumn(
-            "is_high_confidence_match",
+            "is_high_confidence_match_group",
             F.col("match_confidence") == F.lit("high"),
         )
         .withColumn(
             "is_analysis_ready",
             (F.col("publication_year").isNotNull())
-            & (F.col("conflicts_with_metadata_year") == F.lit(False)),
+            & (F.col("analysis_ready_mention_count") > F.lit(0)),
         )
         .withColumn("built_at", F.current_timestamp())
         .select(
@@ -94,17 +102,17 @@ def build_figure_mentions_by_period(
             "publication_month",
             "date_precision",
             "date_calendar",
-            "date_extractor_name",
-            "date_confidence",
-            "conflicts_with_metadata_year",
             "figure_id",
             "canonical_name",
             "match_confidence",
-            "is_high_confidence_match",
+            "is_high_confidence_match_group",
             "is_analysis_ready",
             "mention_count",
             "document_count",
             "matched_variant_count",
+            "high_confidence_match_count",
+            "analysis_ready_mention_count",
+            "analysis_ready_document_count",
             "min_publication_date",
             "max_publication_date",
             "built_at",
