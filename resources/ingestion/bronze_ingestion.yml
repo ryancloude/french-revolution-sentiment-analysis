@@ -15,7 +15,7 @@ resources:
               - --volume
               - ${var.raw_volume}
               - --source-subdir
-              - sample
+              - ${var.source_subdir}
           environment_key: default
 
       environments:

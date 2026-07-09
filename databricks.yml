@@ -9,6 +9,10 @@ variables:
     description: Unity Catalog catalog for project objects
     default: workspace
 
+  source_subdir:
+    description: Raw volume subdirectory to ingest
+    default: full
+
   schema:
     description: Schema containing project tables and volumes
     default: frc_sentiment
