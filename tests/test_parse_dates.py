@@ -208,3 +208,29 @@ def test_parse_abbreviated_revolutionary_month() -> None:
     assert parsed["publication_date"] == "1794-07-27"
     assert parsed["date_calendar"] == "french_republican"
     assert parsed["date_precision"] == "day"
+
+def test_ocr_mangled_month_does_not_crash_parser() -> None:
+    """OCR-mangled month-like text should not crash date parsing."""
+    parsed = parse_publication_date(
+        publication_date_raw=None,
+        title="Adresse du 10 avru 1792",
+    )
+
+    assert parsed["publication_year"] == 1792
+    assert parsed["publication_month"] is None
+    assert parsed["publication_day"] is None
+    assert parsed["date_precision"] == "year"
+
+def test_invalid_gregorian_day_downgrades_to_month_precision() -> None:
+    """Invalid dates like 31 November should preserve month precision but not crash."""
+    parsed = parse_publication_date(
+        publication_date_raw=None,
+        title="Adresse du 31 novembre 1788",
+    )
+
+    assert parsed["publication_year"] == 1788
+    assert parsed["publication_month"] == 11
+    assert parsed["publication_day"] is None
+    assert parsed["publication_date"] is None
+    assert parsed["date_precision"] == "month"
+    assert parsed["date_calendar"] == "gregorian"

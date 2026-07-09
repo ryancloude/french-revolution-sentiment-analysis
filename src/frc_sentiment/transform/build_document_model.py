@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import re
 import unicodedata
 
@@ -143,6 +144,18 @@ REVOLUTIONARY_MONTHS = {
     "fruct.": 12,
 }
 
+def month_regex_pattern(month_lookup: dict[str, int]) -> str:
+    """Build a safe regex alternation pattern from month lookup keys."""
+    return "|".join(
+        re.escape(month)
+        for month in sorted(month_lookup, key=len, reverse=True)
+    )
+
+
+FRENCH_MONTH_PATTERN = month_regex_pattern(FRENCH_MONTHS)
+REVOLUTIONARY_MONTH_PATTERN = month_regex_pattern(REVOLUTIONARY_MONTHS)
+
+
 
 def strip_accents(value: str) -> str:
     """Remove accents for simpler French date matching."""
@@ -213,6 +226,52 @@ def date_result(
         "date_parse_notes": date_parse_notes,
     }
 
+def gregorian_date_result(
+    year: int,
+    month: int,
+    day: int,
+    source: str,
+    confidence: str,
+) -> dict[str, str | int | None]:
+    """Build a Gregorian date result, downgrading invalid dates to month precision."""
+    if not 1 <= month <= 12:
+        return date_result(
+            year,
+            None,
+            None,
+            None,
+            "year",
+            source,
+            "gregorian",
+            confidence,
+            "Invalid Gregorian month detected; preserved year only.",
+        )
+
+    try:
+        parsed_date = dt.date(year, month, day)
+    except ValueError:
+        return date_result(
+            year,
+            month,
+            None,
+            None,
+            "month",
+            source,
+            "gregorian",
+            confidence,
+            "Invalid Gregorian day/month detected; preserved month precision.",
+        )
+
+    return date_result(
+        year,
+        month,
+        day,
+        parsed_date.isoformat(),
+        "day",
+        source,
+        "gregorian",
+        confidence,
+    )
 
 def convert_revolutionary_date(
     republican_year: int,
@@ -249,21 +308,18 @@ def parse_date_from_text(
         month = int(iso_match.group(2))
         day = int(iso_match.group(3))
 
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            return date_result(
+        if 1 <= day <= 31:
+            return gregorian_date_result(
                 year,
                 month,
                 day,
-                f"{year:04d}-{month:02d}-{day:02d}",
-                "day",
                 source,
-                "gregorian",
                 confidence,
             )
 
     revolutionary_day_match = re.search(
         r"\b(\d{1,2})(?:er)?\s+("
-        + "|".join(REVOLUTIONARY_MONTHS)
+        + REVOLUTIONARY_MONTH_PATTERN
         + r")\s+an\s+([ivxlcdm]+|\d+)\b",
         normalized,
     )
@@ -292,7 +348,7 @@ def parse_date_from_text(
 
     french_date_match = re.search(
         r"\b(\d{1,2})(?:er)?\s+("
-        + "|".join(FRENCH_MONTHS)
+        + FRENCH_MONTH_PATTERN
         + r")\s+(1[5-9]\d{2}|20\d{2})\b",
         normalized,
     )
@@ -302,20 +358,17 @@ def parse_date_from_text(
         year = int(french_date_match.group(3))
 
         if 1 <= day <= 31:
-            return date_result(
+            return gregorian_date_result(
                 year,
                 month,
                 day,
-                f"{year:04d}-{month:02d}-{day:02d}",
-                "day",
                 source,
-                "gregorian",
                 confidence,
             )
 
     french_month_year_match = re.search(
         r"\b("
-        + "|".join(FRENCH_MONTHS)
+        + FRENCH_MONTH_PATTERN
         + r")\s+(1[5-9]\d{2}|20\d{2})\b",
         normalized,
     )
@@ -335,7 +388,7 @@ def parse_date_from_text(
 
     revolutionary_month_match = re.search(
         r"\b("
-        + "|".join(REVOLUTIONARY_MONTHS)
+        + REVOLUTIONARY_MONTH_PATTERN
         + r")\s+an\s+([ivxlcdm]+|\d+)\b",
         normalized,
     )
@@ -661,7 +714,10 @@ def build_parsed_documents(
         .withColumn("publication_year", F.col("parsed_date.publication_year"))
         .withColumn("publication_month", F.col("parsed_date.publication_month"))
         .withColumn("publication_day", F.col("parsed_date.publication_day"))
-        .withColumn("publication_date", F.to_date(F.col("parsed_date.publication_date")))
+        .withColumn(
+            "publication_date",
+            F.expr("try_cast(parsed_date.publication_date as date)"),
+        )
         .withColumn("date_precision", F.col("parsed_date.date_precision"))
         .withColumn("date_source", F.col("parsed_date.date_source"))
         .withColumn("date_calendar", F.col("parsed_date.date_calendar"))
