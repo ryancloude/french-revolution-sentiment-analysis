@@ -21,6 +21,14 @@ variables:
     description: Volume containing raw source files
     default: raw
 
+  stance_batch_limit:
+    description: Number of unscored mention contexts to score per stance batch
+    default: 1000
+
+  stance_match_confidence:
+    description: Match confidence filter for stance scoring batches
+    default: high
+
 sync:
   include:
     - src/**

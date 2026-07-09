@@ -93,22 +93,128 @@ def sql_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def ensure_stance_output_tables(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> None:
+    """Create empty stance output tables if they do not already exist."""
+    stance_categories_table = table_name(catalog, schema, "silver_dim_stance_categories")
+    stance_audit_table = table_name(catalog, schema, "silver_stance_model_audit")
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {stance_categories_table} (
+            stance_category_id STRING,
+            stance_label STRING,
+            stance_intensity STRING,
+            stance_confidence STRING,
+            target_relevance STRING,
+            stance_score_method STRING,
+            stance_score DOUBLE,
+            created_at TIMESTAMP
+        )
+        USING DELTA
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {stance_audit_table} (
+            stance_audit_id STRING,
+            mention_id STRING,
+            document_id STRING,
+            figure_id STRING,
+            variant_id STRING,
+            stance_category_id STRING,
+            stance_method STRING,
+            stance_model STRING,
+            stance_score_method STRING,
+            model_stance_score_raw DOUBLE,
+            evidence_text STRING,
+            evidence_translation_en STRING,
+            explanation STRING,
+            raw_response STRING,
+            cleaned_raw_response STRING,
+            prompt STRING,
+            stance_scored_at TIMESTAMP
+        )
+        USING DELTA
+        """
+    )
+
+
+def ensure_fact_stance_columns(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+) -> None:
+    """Add stance columns to the mention fact table if missing."""
+    mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    existing_columns = {field.name for field in spark.table(mentions_table).schema.fields}
+
+    columns_to_add = {
+        "stance_category_id": "STRING",
+        "stance_audit_id": "STRING",
+        "stance_score": "DOUBLE",
+        "is_stance_scored": "BOOLEAN",
+        "is_medium_or_high_stance_confidence": "BOOLEAN",
+        "is_direct_or_indirect_relevance": "BOOLEAN",
+        "stance_updated_at": "TIMESTAMP",
+    }
+
+    for column_name, column_type in columns_to_add.items():
+        if column_name not in existing_columns:
+            spark.sql(
+                f"""
+                ALTER TABLE {mentions_table}
+                ADD COLUMNS ({quote_identifier(column_name)} {column_type})
+                """
+            )
+
+
 def build_context_stance_ai_query(
     spark: SparkSession,
     catalog: str,
     schema: str,
     model: str,
     limit: int | None,
+    figure_id: str | None,
+    publication_year: int | None,
+    publication_month: int | None,
+    match_confidence: str,
+    include_scored: bool,
 ) -> DataFrame:
-    """Create normalized AI stance classifications for mention contexts."""
+    """Create normalized AI stance classifications for a resumable mention batch."""
     mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
     contexts_table = table_name(catalog, schema, "silver_dim_mention_contexts")
     documents_table = table_name(catalog, schema, "silver_dim_documents")
+    stance_audit_table = table_name(catalog, schema, "silver_stance_model_audit")
     temp_view = "tmp_normalized_context_stance_ai_query"
 
     instructions = sql_string_literal(STANCE_INSTRUCTIONS)
     model_name = sql_string_literal(model)
     limit_clause = f"LIMIT {limit}" if limit is not None else ""
+
+    figure_filter = (
+        f"AND m.figure_id = {sql_string_literal(figure_id)}" if figure_id else ""
+    )
+    year_filter = (
+        f"AND m.publication_year = {publication_year}"
+        if publication_year is not None
+        else ""
+    )
+    month_filter = (
+        f"AND m.publication_month = {publication_month}"
+        if publication_month is not None
+        else ""
+    )
+    confidence_filter = (
+        f"AND m.match_confidence = {sql_string_literal(match_confidence)}"
+        if match_confidence != "any"
+        else ""
+    )
+    scored_filter = "" if include_scored else "AND existing.mention_id IS NULL"
 
     normalized = spark.sql(
         f"""
@@ -155,9 +261,18 @@ def build_context_stance_ai_query(
               ON m.mention_id = c.mention_id
             LEFT JOIN {documents_table} d
               ON m.document_id = d.document_id
+            LEFT JOIN {stance_audit_table} existing
+              ON m.mention_id = existing.mention_id
+             AND existing.stance_model = {model_name}
             WHERE c.context_window IS NOT NULL
               AND c.context_window != ''
-            ORDER BY m.mention_id
+              AND m.is_analysis_ready = true
+              {scored_filter}
+              {figure_filter}
+              {year_filter}
+              {month_filter}
+              {confidence_filter}
+            ORDER BY m.publication_year, m.publication_month, m.figure_id, m.mention_id
             {limit_clause}
         ),
 
@@ -223,7 +338,6 @@ def build_context_stance_ai_query(
         validated AS (
             SELECT
                 *,
-
                 CASE
                     WHEN stance_label_raw IN ('positive', 'negative', 'neutral_or_unclear')
                         THEN stance_label_raw
@@ -252,7 +366,6 @@ def build_context_stance_ai_query(
                         THEN target_relevance_raw
                     ELSE 'not_relevant'
                 END AS target_relevance
-
             FROM normalized
         ),
 
@@ -350,144 +463,132 @@ def build_context_stance_ai_query(
     return normalized
 
 
-def write_dim_stance_categories(
+def merge_dim_stance_categories(
     spark: SparkSession,
     catalog: str,
     schema: str,
 ) -> None:
-    """Write stance category dimension from normalized stance results."""
+    """Merge stance category rows from the current batch."""
     temp_view = "tmp_normalized_context_stance_ai_query"
     output_table = table_name(catalog, schema, "silver_dim_stance_categories")
 
     spark.sql(
         f"""
-        CREATE OR REPLACE TABLE {output_table} AS
-        SELECT DISTINCT
-            stance_category_id,
-            stance_label,
-            stance_intensity,
-            stance_confidence,
-            target_relevance,
-            stance_score_method,
-            stance_score,
-            current_timestamp() AS created_at
-        FROM {temp_view}
+        MERGE INTO {output_table} AS target
+        USING (
+            SELECT DISTINCT
+                stance_category_id,
+                stance_label,
+                stance_intensity,
+                stance_confidence,
+                target_relevance,
+                stance_score_method,
+                stance_score,
+                current_timestamp() AS created_at
+            FROM {temp_view}
+        ) AS source
+        ON target.stance_category_id = source.stance_category_id
+        WHEN NOT MATCHED THEN INSERT *
         """
     )
 
-    print(f"Wrote {spark.table(output_table).count()} rows to {output_table}")
+    print(f"Stance categories available: {spark.table(output_table).count()}")
 
 
-def write_stance_model_audit(
+def merge_stance_model_audit(
     spark: SparkSession,
     catalog: str,
     schema: str,
 ) -> None:
-    """Write stance model audit table."""
+    """Merge current batch stance model audit rows."""
     temp_view = "tmp_normalized_context_stance_ai_query"
     output_table = table_name(catalog, schema, "silver_stance_model_audit")
 
     spark.sql(
         f"""
-        CREATE OR REPLACE TABLE {output_table} AS
-        SELECT
-            stance_audit_id,
-            mention_id,
-            document_id,
-            figure_id,
-            variant_id,
-            stance_category_id,
-            stance_method,
-            stance_model,
-            stance_score_method,
-            model_stance_score_raw,
-            evidence_text,
-            evidence_translation_en,
-            explanation,
-            raw_response,
-            cleaned_raw_response,
-            prompt,
-            stance_scored_at
-        FROM {temp_view}
+        MERGE INTO {output_table} AS target
+        USING (
+            SELECT
+                stance_audit_id,
+                mention_id,
+                document_id,
+                figure_id,
+                variant_id,
+                stance_category_id,
+                stance_method,
+                stance_model,
+                stance_score_method,
+                model_stance_score_raw,
+                evidence_text,
+                evidence_translation_en,
+                explanation,
+                raw_response,
+                cleaned_raw_response,
+                prompt,
+                stance_scored_at
+            FROM {temp_view}
+        ) AS source
+        ON target.stance_audit_id = source.stance_audit_id
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
         """
     )
 
-    print(f"Wrote {spark.table(output_table).count()} rows to {output_table}")
+    print(f"Stance audit rows available: {spark.table(output_table).count()}")
 
 
-def update_fact_figure_mentions(
+def update_fact_figure_mentions_from_audit(
     spark: SparkSession,
     catalog: str,
     schema: str,
 ) -> None:
-    """Overwrite figure mention fact table with selected stance fields added."""
-    temp_view = "tmp_normalized_context_stance_ai_query"
+    """Update mention fact stance fields from the latest audit result per mention."""
     mentions_table = table_name(catalog, schema, "silver_fact_figure_mentions")
+    stance_audit_table = table_name(catalog, schema, "silver_stance_model_audit")
+    stance_categories_table = table_name(catalog, schema, "silver_dim_stance_categories")
 
     spark.sql(
         f"""
-        CREATE OR REPLACE TABLE {mentions_table} AS
-        SELECT
-            m.mention_id,
-            m.document_id,
-            m.figure_id,
-            m.variant_id,
-            m.date_key,
-            m.canonical_name,
-            m.matched_variant,
-            m.variant_normalized,
-            m.variant_type,
-            m.match_confidence,
-            m.is_high_confidence_match,
-            m.match_method,
-            m.match_start_char,
-            m.match_end_char,
-            m.publication_year,
-            m.publication_month,
-            m.publication_day,
-            m.publication_date,
-            m.date_precision,
-            m.date_calendar,
-            m.ocr_quality_flag,
-            m.included_in_analysis_flag,
+        MERGE INTO {mentions_table} AS target
+        USING (
+            WITH ranked_audit AS (
+                SELECT
+                    audit.*,
+                    row_number() OVER (
+                        PARTITION BY audit.mention_id
+                        ORDER BY audit.stance_scored_at DESC, audit.stance_audit_id DESC
+                    ) AS audit_rank
+                FROM {stance_audit_table} audit
+            )
 
-            s.stance_category_id,
-            s.stance_audit_id,
-            s.stance_score,
-
-            CASE
-                WHEN s.mention_id IS NOT NULL THEN true
-                ELSE false
-            END AS is_stance_scored,
-
-            CASE
-                WHEN s.stance_confidence IN ('medium', 'high') THEN true
-                ELSE false
-            END AS is_medium_or_high_stance_confidence,
-
-            CASE
-                WHEN s.target_relevance IN ('direct', 'indirect') THEN true
-                ELSE false
-            END AS is_direct_or_indirect_relevance,
-
-            CASE
-                WHEN m.is_analysis_ready
-                     AND s.mention_id IS NOT NULL
-                     AND s.stance_confidence IN ('medium', 'high')
-                THEN true
-                ELSE false
-            END AS is_analysis_ready,
-
-            m.extracted_at,
-            current_timestamp() AS stance_updated_at
-
-        FROM {mentions_table} m
-        LEFT JOIN {temp_view} s
-          ON m.mention_id = s.mention_id
+            SELECT
+                ranked_audit.mention_id,
+                ranked_audit.stance_audit_id,
+                ranked_audit.stance_category_id,
+                categories.stance_score,
+                categories.stance_confidence,
+                categories.target_relevance,
+                ranked_audit.stance_scored_at
+            FROM ranked_audit
+            LEFT JOIN {stance_categories_table} categories
+              ON ranked_audit.stance_category_id = categories.stance_category_id
+            WHERE ranked_audit.audit_rank = 1
+        ) AS source
+        ON target.mention_id = source.mention_id
+        WHEN MATCHED THEN UPDATE SET
+            target.stance_category_id = source.stance_category_id,
+            target.stance_audit_id = source.stance_audit_id,
+            target.stance_score = source.stance_score,
+            target.is_stance_scored = true,
+            target.is_medium_or_high_stance_confidence =
+                source.stance_confidence IN ('medium', 'high'),
+            target.is_direct_or_indirect_relevance =
+                source.target_relevance IN ('direct', 'indirect'),
+            target.stance_updated_at = source.stance_scored_at
         """
     )
 
-    print(f"Updated {spark.table(mentions_table).count()} rows in {mentions_table}")
+    print(f"Updated stance fields in {mentions_table}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -496,7 +597,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--schema", required=True)
     parser.add_argument("--model", default=AI_QUERY_MODEL)
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument("--figure-id", default=None)
+    parser.add_argument("--publication-year", type=int, default=None)
+    parser.add_argument("--publication-month", type=int, default=None)
+    parser.add_argument(
+        "--match-confidence",
+        choices=["high", "medium", "low", "any"],
+        default="high",
+    )
+    parser.add_argument(
+        "--include-scored",
+        action="store_true",
+        help="Rescore mentions even if they already have an audit row for the model.",
+    )
     return parser.parse_args()
 
 
@@ -505,27 +619,55 @@ def main() -> None:
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
 
-    build_context_stance_ai_query(
+    ensure_stance_output_tables(
+        spark=spark,
+        catalog=args.catalog,
+        schema=args.schema,
+    )
+
+    ensure_fact_stance_columns(
+        spark=spark,
+        catalog=args.catalog,
+        schema=args.schema,
+    )
+
+    batch = build_context_stance_ai_query(
         spark=spark,
         catalog=args.catalog,
         schema=args.schema,
         model=args.model,
         limit=args.limit,
+        figure_id=args.figure_id,
+        publication_year=args.publication_year,
+        publication_month=args.publication_month,
+        match_confidence=args.match_confidence,
+        include_scored=args.include_scored,
     )
 
-    write_dim_stance_categories(
+    batch_count = batch.count()
+    print(f"Scored batch rows: {batch_count}")
+
+    if batch_count == 0:
+        update_fact_figure_mentions_from_audit(
+            spark=spark,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
+        return
+
+    merge_dim_stance_categories(
         spark=spark,
         catalog=args.catalog,
         schema=args.schema,
     )
 
-    write_stance_model_audit(
+    merge_stance_model_audit(
         spark=spark,
         catalog=args.catalog,
         schema=args.schema,
     )
 
-    update_fact_figure_mentions(
+    update_fact_figure_mentions_from_audit(
         spark=spark,
         catalog=args.catalog,
         schema=args.schema,

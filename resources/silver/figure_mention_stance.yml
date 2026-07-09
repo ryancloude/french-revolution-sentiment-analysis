@@ -3,6 +3,12 @@ resources:
     silver_figure_mention_stance:
       name: ${bundle.target}-frc-silver-figure-mention-stance
 
+      parameters:
+        - name: stance_batch_limit
+          default: "1000"
+        - name: stance_match_confidence
+          default: "high"
+
       tasks:
         - task_key: score_figure_mention_stance
           spark_python_task:
@@ -12,6 +18,10 @@ resources:
               - ${var.catalog}
               - --schema
               - ${var.schema}
+              - --limit
+              - "{{job.parameters.stance_batch_limit}}"
+              - --match-confidence
+              - "{{job.parameters.stance_match_confidence}}"
           environment_key: default
 
       environments:
